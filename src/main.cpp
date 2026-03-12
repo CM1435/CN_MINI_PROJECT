@@ -2,7 +2,6 @@
 #include "../include/logger.h"
 #include <iostream>
 #include <csignal>
-#include <cstring>
 #include <string>
 
 // ─────────────────────────────────────────────
@@ -80,10 +79,9 @@ int main(int argc, char* argv[]) {
     // init logger
     Logger::instance().init("proxy.log", cfg.verbose);
 
-    // signal handling
+    // signal handling (no SIGPIPE on Windows)
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
-    std::signal(SIGPIPE, SIG_IGN);  // ignore broken pipe
 
     // start proxy
     ProxyServer proxy(cfg);

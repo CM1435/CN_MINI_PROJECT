@@ -1,0 +1,22 @@
+{
+  "hits":2,
+  "misses":5,
+  "evictions":0,
+  "active_connections":0,
+  "bytes_saved":1756,
+  "total_bytes_served":4126,
+  "cache_entries":1,
+  "cache_bytes":878,
+  "max_entries":500,
+  "max_bytes":52428800,
+  "policy":"LRU",
+  "recent_requests": [
+    {"url":"http://youtube.com/","hit":false,"size":373,"time":"17:16:59"},
+    {"url":"http://youtube.com/","hit":false,"size":373,"time":"17:16:48"},
+    {"url":"http://info.cern.ch/","hit":true,"size":878,"time":"17:16:38"},
+    {"url":"http://info.cern.ch/","hit":true,"size":878,"time":"17:15:56"},
+    {"url":"http://info.cern.ch/","hit":false,"size":878,"time":"17:15:54"},
+    {"url":"http://youtube.com/","hit":false,"size":373,"time":"17:15:47"},
+    {"url":"http://youtube.com/","hit":false,"size":373,"time":"17:15:44"}
+  ]
+}

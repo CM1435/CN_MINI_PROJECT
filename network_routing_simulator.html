@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Routing Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #050a0f;
+    --panel:     #0a1520;
+    --border:    #0d2137;
+    --accent:    #00d4ff;
+    --accent2:   #ff6b35;
+    --green:     #00ff88;
+    --yellow:    #ffd700;
+    --text:      #c8e0f0;
+    --dim:       #3a5a70;
+    --node-def:  #0d2137;
+    --node-vis:  #003d5c;
+    --node-done: #00443a;
+    --edge-def:  #0d2137;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Exo 2', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* grid background */
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background-image:
+      linear-gradient(rgba(0,212,255,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events:none;
+    z-index:0;
+  }
+
+  .wrapper { position:relative; z-index:1; display:flex; flex-direction:column; height:100vh; }
+
+  /* ── Header ── */
+  header {
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items:center; justify-content:space-between;
+    background: rgba(10,21,32,.9);
+    backdrop-filter: blur(10px);
+  }
+  .logo {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 1.1rem;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--accent2); }
+  .algo-tabs { display:flex; gap:8px; }
+  .algo-btn {
+    padding: 6px 18px;
+    border: 1px solid var(--dim);
+    background: transparent;
+    color: var(--dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: .8rem;
+    letter-spacing:1px;
+    cursor:pointer;
+    transition: all .2s;
+    text-transform: uppercase;
+  }
+  .algo-btn.active, .algo-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,212,255,.08);
+    box-shadow: 0 0 12px rgba(0,212,255,.2);
+  }
+
+  /* ── Main Layout ── */
+  .main { display:flex; flex:1; overflow:hidden; }
+
+  /* ── Left Panel ── */
+  .left-panel {
+    width: 260px;
+    min-width: 260px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction:column;
+    overflow-y: auto;
+  }
+  .panel-section { padding:16px; border-bottom:1px solid var(--border); }
+  .panel-title {
+    font-family:'Share Tech Mono', monospace;
+    font-size:.7rem;
+    letter-spacing:2px;
+    color: var(--accent);
+    text-transform:uppercase;
+    margin-bottom:12px;
+  }
+
+  .control-row { display:flex; gap:8px; margin-bottom:8px; align-items:center; }
+  .control-row label { font-size:.75rem; color:var(--dim); width:60px; flex-shrink:0; }
+
+  input[type=number], select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 8px;
+    font-family:'Share Tech Mono', monospace;
+    font-size:.8rem;
+    flex:1;
+    outline:none;
+    transition: border-color .2s;
+  }
+  input[type=number]:focus, select:focus { border-color:var(--accent); }
+
+  .btn {
+    width:100%; padding:9px;
+    border:1px solid var(--accent);
+    background: rgba(0,212,255,.08);
+    color: var(--accent);
+    font-family:'Share Tech Mono', monospace;
+    font-size:.8rem;
+    letter-spacing:1px;
+    text-transform:uppercase;
+    cursor:pointer;
+    transition: all .2s;
+    margin-bottom:6px;
+  }
+  .btn:hover { background:rgba(0,212,255,.18); box-shadow:0 0 16px rgba(0,212,255,.25); }
+  .btn.danger { border-color:var(--accent2); color:var(--accent2); background:rgba(255,107,53,.08); }
+  .btn.danger:hover { background:rgba(255,107,53,.18); }
+  .btn.go { border-color:var(--green); color:var(--green); background:rgba(0,255,136,.08); }
+  .btn.go:hover { background:rgba(0,255,136,.18); box-shadow:0 0 16px rgba(0,255,136,.25); }
+  .btn:disabled { opacity:.35; cursor:not-allowed; }
+
+  .speed-row { display:flex; align-items:center; gap:8px; margin-top:4px; }
+  .speed-row label { font-size:.72rem; color:var(--dim); }
+  input[type=range] {
+    flex:1; accent-color:var(--accent);
+    cursor:pointer;
+  }
+  .speed-val { font-family:'Share Tech Mono'; font-size:.75rem; color:var(--accent); width:40px; text-align:right; }
+
+  /* legend */
+  .legend { display:flex; flex-direction:column; gap:6px; }
+  .leg-item { display:flex; align-items:center; gap:8px; font-size:.73rem; color:var(--dim); }
+  .leg-dot { width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+
+  /* dist table */
+  #dist-table { width:100%; border-collapse:collapse; font-size:.76rem; }
+  #dist-table th {
+    font-family:'Share Tech Mono'; font-size:.65rem; letter-spacing:1px;
+    color:var(--accent); text-align:left; padding:4px 6px;
+    border-bottom:1px solid var(--border);
+  }
+  #dist-table td { padding:4px 6px; border-bottom:1px solid rgba(13,33,55,.5); }
+  #dist-table tr.highlight td { color:var(--green); }
+  #dist-table tr.path-row td { color:var(--yellow); }
+
+  /* ── Canvas Area ── */
+  .canvas-wrap {
+    flex:1; position:relative; overflow:hidden;
+    background: radial-gradient(ellipse at 50% 50%, #071220 0%, var(--bg) 70%);
+  }
+  canvas { display:block; width:100%; height:100%; }
+
+  /* tooltip */
+  #tooltip {
+    position:absolute; pointer-events:none;
+    background:rgba(10,21,32,.95); border:1px solid var(--accent);
+    padding:6px 10px; font-size:.75rem;
+    font-family:'Share Tech Mono'; color:var(--accent);
+    display:none; z-index:10;
+    box-shadow: 0 0 16px rgba(0,212,255,.3);
+  }
+
+  /* ── Right Panel — Log ── */
+  .right-panel {
+    width: 240px; min-width:240px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display:flex; flex-direction:column;
+    overflow:hidden;
+  }
+  .log-header {
+    padding:12px 16px; border-bottom:1px solid var(--border);
+    font-family:'Share Tech Mono'; font-size:.7rem;
+    letter-spacing:2px; color:var(--accent); text-transform:uppercase;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #log {
+    flex:1; overflow-y:auto; padding:10px;
+    font-family:'Share Tech Mono'; font-size:.7rem;
+    line-height:1.7;
+  }
+  #log::-webkit-scrollbar { width:4px; }
+  #log::-webkit-scrollbar-track { background:var(--bg); }
+  #log::-webkit-scrollbar-thumb { background:var(--dim); }
+
+  .log-entry { margin-bottom:2px; }
+  .log-entry.step  { color: var(--text); }
+  .log-entry.visit { color: var(--accent); }
+  .log-entry.relax { color: var(--yellow); }
+  .log-entry.done  { color: var(--green); }
+  .log-entry.info  { color: var(--dim); }
+  .log-entry.path  { color: var(--accent2); }
+
+  /* status bar */
+  .statusbar {
+    padding:6px 16px; border-top:1px solid var(--border);
+    font-family:'Share Tech Mono'; font-size:.68rem;
+    color:var(--dim); display:flex; gap:16px;
+  }
+  .statusbar span { color:var(--accent); }
+
+  /* mode hint */
+  .mode-hint {
+    position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    font-family:'Share Tech Mono'; font-size:.7rem; color:var(--dim);
+    background:rgba(10,21,32,.8); padding:5px 14px; border:1px solid var(--border);
+    pointer-events:none;
+  }
+
+  /* ── Responsive ── */
+  @media(max-width:800px){
+    .left-panel, .right-panel { display:none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- HEADER -->
+<header>
+  <div class="logo">NET<span>ROUTE</span> // Simulator</div>
+  <div class="algo-tabs">
+    <button class="algo-btn active" id="btn-dijkstra" onclick="setAlgo('dijkstra')">Dijkstra</button>
+    <button class="algo-btn" id="btn-bellman" onclick="setAlgo('bellman')">Bellman-Ford</button>
+  </div>
+  <div style="font-family:'Share Tech Mono';font-size:.7rem;color:var(--dim)">
+    CN Mini Project &mdash; Web Routing Sim
+  </div>
+</header>
+
+<div class="main">
+
+<!-- LEFT PANEL -->
+<div class="left-panel">
+
+  <div class="panel-section">
+    <div class="panel-title">Graph Setup</div>
+    <div class="control-row">
+      <label>Nodes</label>
+      <input type="number" id="node-count" value="7" min="3" max="12">
+    </div>
+    <button class="btn" onclick="generateRandom()">Generate Random Graph</button>
+    <button class="btn danger" onclick="clearGraph()">Clear Graph</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Add Edge</div>
+    <div class="control-row">
+      <label>From</label>
+      <select id="edge-from"></select>
+    </div>
+    <div class="control-row">
+      <label>To</label>
+      <select id="edge-to"></select>
+    </div>
+    <div class="control-row">
+      <label>Weight</label>
+      <input type="number" id="edge-weight" value="5" min="1" max="99">
+    </div>
+    <button class="btn" onclick="addEdgeManual()">Add Edge</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Simulation</div>
+    <div class="control-row">
+      <label>Source</label>
+      <select id="src-node"></select>
+    </div>
+    <div class="control-row">
+      <label>Target</label>
+      <select id="tgt-node"></select>
+    </div>
+    <div class="speed-row">
+      <label>Speed</label>
+      <input type="range" id="speed" min="100" max="2000" value="700" oninput="updateSpeed()">
+      <span class="speed-val" id="speed-label">700ms</span>
+    </div>
+    <button class="btn go" id="run-btn" onclick="runAlgo()">▶ Run Algorithm</button>
+    <button class="btn" onclick="stepAlgo()" id="step-btn">⏭ Step</button>
+    <button class="btn danger" onclick="resetViz()">↺ Reset</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Legend</div>
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#1a4060;border:2px solid #0d2137"></div>Unvisited Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#00d4ff;box-shadow:0 0 8px #00d4ff"></div>Current Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#00443a;border:2px solid #00ff88"></div>Visited Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ff6b35;border-radius:0"></div>Shortest Path</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ffd700;border-radius:0"></div>Relaxed Edge</div>
+    </div>
+  </div>
+
+  <div class="panel-section" style="flex:1">
+    <div class="panel-title">Distance Table</div>
+    <table id="dist-table">
+      <thead><tr><th>Node</th><th>Dist</th><th>Via</th></tr></thead>
+      <tbody id="dist-tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<!-- CANVAS -->
+<div class="canvas-wrap" id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="tooltip"></div>
+  <div class="mode-hint" id="mode-hint">Click canvas to add node &bull; Click two nodes to add edge</div>
+</div>
+
+<!-- RIGHT PANEL — LOG -->
+<div class="right-panel">
+  <div class="log-header">
+    Algorithm Log
+    <button style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:.8rem" onclick="clearLog()">CLR</button>
+  </div>
+  <div id="log"></div>
+  <div class="statusbar">
+    Step: <span id="stat-step">0</span>
+    &nbsp;|&nbsp; Visited: <span id="stat-visited">0</span>
+  </div>
+</div>
+
+</div><!-- main -->
+</div><!-- wrapper -->
+
+<div id="tooltip"></div>
+
+<script>
+// ════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const wrap   = document.getElementById('canvas-wrap');
+
+let nodes = [];       // {id, x, y, label}
+let edges = [];       // {from, to, weight}
+let algo  = 'dijkstra';
+
+// interaction
+let clickFirst = null;   // first node clicked for edge
+let isDragging = false;
+let dragNode   = null;
+let dragOffX   = 0, dragOffY = 0;
+
+// simulation
+let simSteps   = [];
+let simIndex   = 0;
+let simTimer   = null;
+let simRunning = false;
+let simSpeed   = 700;
+
+// vis state
+let nodeState  = {};   // id -> 'unvisited'|'current'|'visited'
+let edgeState  = {};   // "f-t" -> 'default'|'relaxed'|'path'
+let dist       = {};
+let prev       = {};
+
+const NODE_R   = 22;
+const COLORS = {
+  nodeBg:      '#0d2137',
+  nodeBorder:  '#0d3355',
+  nodeVisited: '#00443a',
+  nodeCurrent: '#003d5c',
+  nodeText:    '#c8e0f0',
+  edgeDef:     '#0d2855',
+  edgeRelaxed: '#ffd700',
+  edgePath:    '#ff6b35',
+  edgeCurrent: '#00d4ff',
+  accent:      '#00d4ff',
+  green:       '#00ff88',
+  orange:      '#ff6b35',
+};
+
+// ════════════════════════════════════════════
+//  CANVAS RESIZE
+// ════════════════════════════════════════════
+function resizeCanvas() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  draw();
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ════════════════════════════════════════════
+//  DRAW
+// ════════════════════════════════════════════
+function draw() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // edges
+  for (const e of edges) {
+    const a = nodes.find(n=>n.id===e.from);
+    const b = nodes.find(n=>n.id===e.to);
+    if (!a||!b) continue;
+    const key1 = `${e.from}-${e.to}`;
+    const key2 = `${e.to}-${e.from}`;
+    const st   = edgeState[key1] || edgeState[key2] || 'default';
+    drawEdge(a,b,e.weight,st);
+  }
+
+  // nodes
+  for (const n of nodes) {
+    const st = nodeState[n.id] || 'unvisited';
+    drawNode(n, st);
+  }
+
+  // highlight first clicked
+  if (clickFirst !== null) {
+    const n = nodes.find(x=>x.id===clickFirst);
+    if (n) {
+      ctx.beginPath();
+      ctx.arc(n.x,n.y,NODE_R+5,0,Math.PI*2);
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth   = 2;
+      ctx.setLineDash([4,4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+function drawEdge(a, b, weight, state) {
+  const dx = b.x-a.x, dy = b.y-a.y;
+  const len = Math.sqrt(dx*dx+dy*dy);
+  if (len===0) return;
+
+  // shorten to node border
+  const ux = dx/len, uy = dy/len;
+  const sx = a.x + ux*NODE_R, sy = a.y + uy*NODE_R;
+  const ex = b.x - ux*NODE_R, ey = b.y - uy*NODE_R;
+
+  let color, lw, glow;
+  if (state==='path')    { color=COLORS.edgePath;    lw=4; glow=true; }
+  else if(state==='relaxed') { color=COLORS.edgeRelaxed; lw=2.5; glow=false; }
+  else if(state==='current') { color=COLORS.edgeCurrent; lw=2.5; glow=true; }
+  else                   { color=COLORS.edgeDef;     lw=1.5; glow=false; }
+
+  if (glow) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur  = 12;
+  }
+  ctx.beginPath();
+  ctx.moveTo(sx,sy); ctx.lineTo(ex,ey);
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = lw;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // arrowhead
+  const angle = Math.atan2(dy,dx);
+  const ax = ex - 10*Math.cos(angle);
+  const ay = ey - 10*Math.sin(angle);
+  ctx.beginPath();
+  ctx.moveTo(ex,ey);
+  ctx.lineTo(ax - 6*Math.sin(angle), ay + 6*Math.cos(angle));
+  ctx.lineTo(ax + 6*Math.sin(angle), ay - 6*Math.cos(angle));
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  // weight label
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+  const nx2 = -uy*12, ny2 = ux*12;
+  ctx.fillStyle   = '#ffd700';
+  ctx.font        = 'bold 11px "Share Tech Mono"';
+  ctx.textAlign   = 'center';
+  ctx.textBaseline= 'middle';
+  // small bg
+  ctx.fillStyle   = 'rgba(5,10,15,.8)';
+  ctx.fillRect(mx+nx2-10, my+ny2-8, 20, 16);
+  ctx.fillStyle   = state==='relaxed' ? '#ffd700' : (state==='path' ? '#ff6b35' : '#3a6a90');
+  ctx.fillText(weight, mx+nx2, my+ny2);
+}
+
+function drawNode(n, state) {
+  let bg, border, glow;
+  if (state==='current') {
+    bg=COLORS.nodeCurrent; border=COLORS.accent; glow=true;
+  } else if (state==='visited') {
+    bg=COLORS.nodeVisited; border=COLORS.green; glow=false;
+  } else if (state==='path') {
+    bg='#3d1a00'; border=COLORS.orange; glow=true;
+  } else {
+    bg=COLORS.nodeBg; border=COLORS.nodeBorder; glow=false;
+  }
+
+  if (glow) { ctx.shadowColor=border; ctx.shadowBlur=20; }
+  ctx.beginPath();
+  ctx.arc(n.x,n.y,NODE_R,0,Math.PI*2);
+  ctx.fillStyle = bg;
+  ctx.fill();
+  ctx.strokeStyle = border;
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // label
+  ctx.fillStyle    = state==='current' ? COLORS.accent : COLORS.nodeText;
+  ctx.font         = `bold 13px "Exo 2"`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(n.label, n.x, n.y);
+
+  // dist label above
+  if (dist[n.id] !== undefined && dist[n.id] !== Infinity) {
+    const d = dist[n.id];
+    ctx.fillStyle = state==='path' ? COLORS.orange :
+                    state==='current' ? COLORS.accent :
+                    state==='visited' ? COLORS.green : COLORS.nodeText;
+    ctx.font = '10px "Share Tech Mono"';
+    ctx.fillText(d===Infinity?'∞':d, n.x, n.y - NODE_R - 6);
+  }
+}
+
+// ════════════════════════════════════════════
+//  GRAPH MANAGEMENT
+// ════════════════════════════════════════════
+let nextId = 0;
+const LABELS = 'ABCDEFGHIJKL';
+
+function addNode(x, y) {
+  if (nodes.length >= 12) return;
+  const id    = nextId++;
+  const label = LABELS[nodes.length] || String(nodes.length);
+  nodes.push({id, x, y, label});
+  populateSelects();
+  draw();
+}
+
+function addEdge(from, to, weight) {
+  // prevent duplicate
+  if (edges.find(e=> (e.from===from&&e.to===to)||(e.from===to&&e.to===from))) return;
+  edges.push({from, to, weight: parseInt(weight)||1});
+  draw();
+}
+
+function addEdgeManual() {
+  const f = parseInt(document.getElementById('edge-from').value);
+  const t = parseInt(document.getElementById('edge-to').value);
+  const w = parseInt(document.getElementById('edge-weight').value)||1;
+  if (f===t||isNaN(f)||isNaN(t)) return;
+  addEdge(f,t,w);
+  logEntry(`Edge ${getLabel(f)} → ${getLabel(t)} [w=${w}] added`, 'info');
+}
+
+function getLabel(id) {
+  const n = nodes.find(x=>x.id===id);
+  return n ? n.label : '?';
+}
+
+function clearGraph() {
+  nodes=[]; edges=[]; nextId=0;
+  resetViz();
+  populateSelects();
+  draw();
+  logEntry('Graph cleared', 'info');
+}
+
+function generateRandom() {
+  clearGraph();
+  const count = parseInt(document.getElementById('node-count').value)||7;
+  const W = canvas.width, H = canvas.height;
+  const margin = 80;
+
+  // place nodes in a circle + some random scatter
+  for (let i=0;i<count;i++) {
+    const angle = (i/count)*Math.PI*2 - Math.PI/2;
+    const r     = Math.min(W,H)/2 * 0.55;
+    const cx    = W/2 + Math.cos(angle)*r + (Math.random()-.5)*60;
+    const cy    = H/2 + Math.sin(angle)*r + (Math.random()-.5)*60;
+    addNode(
+      Math.max(margin, Math.min(W-margin, cx)),
+      Math.max(margin, Math.min(H-margin, cy))
+    );
+  }
+
+  // random edges — ensure connected
+  for (let i=0;i<count-1;i++) {
+    const w = Math.floor(Math.random()*15)+1;
+    addEdge(nodes[i].id, nodes[i+1].id, w);
+  }
+  // extra random edges
+  const extra = Math.floor(count * 1.5);
+  for (let k=0;k<extra;k++) {
+    const i = Math.floor(Math.random()*count);
+    const j = Math.floor(Math.random()*count);
+    if (i!==j) {
+      const w = Math.floor(Math.random()*20)+1;
+      addEdge(nodes[i].id, nodes[j].id, w);
+    }
+  }
+
+  logEntry(`Random graph: ${count} nodes, ${edges.length} edges`, 'info');
+  populateSelects();
+  draw();
+}
+
+// ════════════════════════════════════════════
+//  SELECTS
+// ════════════════════════════════════════════
+function populateSelects() {
+  const ids = ['edge-from','edge-to','src-node','tgt-node'];
+  ids.forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    sel.innerHTML = nodes.map(n=>`<option value="${n.id}">${n.label}</option>`).join('');
+    if ([...sel.options].find(o=>o.value==cur)) sel.value=cur;
+  });
+  updateDistTable();
+}
+
+// ════════════════════════════════════════════
+//  ALGORITHMS — build steps
+// ════════════════════════════════════════════
+
+function buildAdjacency() {
+  const adj = {};
+  nodes.forEach(n => adj[n.id]=[]);
+  edges.forEach(e => {
+    adj[e.from].push({to:e.to, w:e.weight});
+    adj[e.to].push({to:e.from, w:e.weight}); // undirected
+  });
+  return adj;
+}
+
+// ── Dijkstra ──────────────────────────────
+function buildDijkstraSteps(srcId) {
+  const steps = [];
+  const adj   = buildAdjacency();
+  const d     = {};
+  const p     = {};
+  const vis   = new Set();
+
+  nodes.forEach(n => { d[n.id]=Infinity; p[n.id]=null; });
+  d[srcId] = 0;
+
+  steps.push({ type:'init', dist:{...d}, prev:{...p}, msg:`Init: all distances = ∞, dist[${getLabel(srcId)}]=0` });
+
+  for (let iter=0; iter<nodes.length; iter++) {
+    // pick unvisited min
+    let u = null, minD = Infinity;
+    nodes.forEach(n => {
+      if (!vis.has(n.id) && d[n.id] < minD) { minD=d[n.id]; u=n.id; }
+    });
+    if (u===null) break;
+
+    vis.add(u);
+    steps.push({ type:'visit', node:u, dist:{...d}, prev:{...p},
+      msg:`Visit ${getLabel(u)} (dist=${d[u]===Infinity?'∞':d[u]})` });
+
+    for (const {to, w} of adj[u]) {
+      if (vis.has(to)) continue;
+      const newD = d[u] + w;
+      steps.push({ type:'relax', from:u, to, w, newD, oldD:d[to],
+        dist:{...d}, prev:{...p},
+        msg:`Relax ${getLabel(u)}→${getLabel(to)}: ${d[u]}+${w}=${newD} ${newD<d[to]?'< ':'≥ '}${d[to]===Infinity?'∞':d[to]}` });
+      if (newD < d[to]) {
+        d[to] = newD; p[to] = u;
+        steps.push({ type:'update', node:to, dist:{...d}, prev:{...p},
+          msg:`  ✓ Update dist[${getLabel(to)}]=${newD}, prev=${getLabel(u)}` });
+      }
+    }
+  }
+  steps.push({ type:'done', dist:{...d}, prev:{...p}, msg:'Dijkstra complete!' });
+  return { steps, finalDist:d, finalPrev:p };
+}
+
+// ── Bellman-Ford ───────────────────────────
+function buildBellmanSteps(srcId) {
+  const steps = [];
+  const d     = {};
+  const p     = {};
+
+  nodes.forEach(n => { d[n.id]=Infinity; p[n.id]=null; });
+  d[srcId] = 0;
+
+  steps.push({ type:'init', dist:{...d}, prev:{...p},
+    msg:`Init: dist[${getLabel(srcId)}]=0, others=∞` });
+
+  const N = nodes.length;
+  for (let iter=1; iter<N; iter++) {
+    steps.push({ type:'iteration', iter, dist:{...d}, prev:{...p},
+      msg:`── Iteration ${iter} of ${N-1} ──` });
+
+    let updated = false;
+    for (const e of edges) {
+      // forward
+      for (const [u,v] of [[e.from,e.to],[e.to,e.from]]) {
+        if (d[u]===Infinity) continue;
+        const newD = d[u]+e.weight;
+        steps.push({ type:'relax', from:u, to:v, w:e.weight, newD, oldD:d[v],
+          dist:{...d}, prev:{...p},
+          msg:`Relax ${getLabel(u)}→${getLabel(v)}: ${d[u]}+${e.weight}=${newD} ${newD<d[v]?'<':'≥'} ${d[v]===Infinity?'∞':d[v]}` });
+        if (newD < d[v]) {
+          d[v]=newD; p[v]=u; updated=true;
+          steps.push({ type:'update', node:v, dist:{...d}, prev:{...p},
+            msg:`  ✓ dist[${getLabel(v)}]=${newD}` });
+        }
+      }
+    }
+    if (!updated) {
+      steps.push({ type:'early', dist:{...d}, prev:{...p},
+        msg:`Early termination at iter ${iter} — no updates` });
+      break;
+    }
+  }
+  steps.push({ type:'done', dist:{...d}, prev:{...p}, msg:'Bellman-Ford complete!' });
+  return { steps, finalDist:d, finalPrev:p };
+}
+
+// ════════════════════════════════════════════
+//  SIMULATION CONTROL
+// ════════════════════════════════════════════
+let finalDist={}, finalPrev={};
+
+function runAlgo() {
+  if (nodes.length < 2) { logEntry('Need at least 2 nodes!','info'); return; }
+  if (simRunning) { stopSim(); return; }
+
+  resetViz();
+  const srcId = parseInt(document.getElementById('src-node').value);
+  const tgtId = parseInt(document.getElementById('tgt-node').value);
+
+  logEntry(`Running ${algo.toUpperCase()} from ${getLabel(srcId)} to ${getLabel(tgtId)}`, 'step');
+
+  const result = algo==='dijkstra'
+    ? buildDijkstraSteps(srcId)
+    : buildBellmanSteps(srcId);
+
+  simSteps   = result.steps;
+  finalDist  = result.finalDist;
+  finalPrev  = result.finalPrev;
+  simIndex   = 0;
+  simRunning = true;
+
+  document.getElementById('run-btn').textContent = '⏸ Pause';
+  simTimer = setInterval(()=>{
+    if (simIndex >= simSteps.length) {
+      stopSim();
+      showPath(srcId, tgtId);
+      return;
+    }
+    applyStep(simSteps[simIndex]);
+    simIndex++;
+  }, simSpeed);
+}
+
+function stopSim() {
+  clearInterval(simTimer);
+  simRunning = false;
+  document.getElementById('run-btn').textContent = '▶ Run Algorithm';
+}
+
+function stepAlgo() {
+  if (simSteps.length===0) {
+    // init steps without running
+    resetViz();
+    const srcId = parseInt(document.getElementById('src-node').value);
+    const tgtId = parseInt(document.getElementById('tgt-node').value);
+    const result = algo==='dijkstra'
+      ? buildDijkstraSteps(srcId)
+      : buildBellmanSteps(srcId);
+    simSteps  = result.steps;
+    finalDist = result.finalDist;
+    finalPrev = result.finalPrev;
+    simIndex  = 0;
+    logEntry(`Step mode: ${algo.toUpperCase()} from ${getLabel(srcId)}`, 'step');
+  }
+  if (simIndex >= simSteps.length) {
+    const tgtId = parseInt(document.getElementById('tgt-node').value);
+    const srcId = parseInt(document.getElementById('src-node').value);
+    showPath(srcId, tgtId);
+    return;
+  }
+  stopSim();
+  applyStep(simSteps[simIndex]);
+  simIndex++;
+}
+
+function applyStep(step) {
+  dist = {...step.dist};
+  prev = {...step.prev};
+
+  // reset edge states
+  Object.keys(edgeState).forEach(k => {
+    if (edgeState[k]!=='path') edgeState[k]='default';
+  });
+
+  if (step.type==='visit') {
+    nodeState[step.node] = 'current';
+  }
+  if (step.type==='relax'||step.type==='update') {
+    const k1=`${step.from}-${step.to}`, k2=`${step.to}-${step.from}`;
+    if (edgeState[k1]!=='path') edgeState[k1]='relaxed';
+    if (edgeState[k2]!=='path') edgeState[k2]='relaxed';
+    if (step.type==='update') {
+      nodeState[step.to] = 'visited';
+      // mark current node's previous visits done
+      Object.keys(nodeState).forEach(id=>{
+        if (nodeState[id]==='current' && parseInt(id)!==step.to)
+          nodeState[id]='visited';
+      });
+    }
+  }
+  if (step.type==='done') {
+    nodes.forEach(n => {
+      if (nodeState[n.id]==='current') nodeState[n.id]='visited';
+    });
+  }
+
+  logEntry(step.msg, step.type==='update'?'relax':
+    step.type==='visit'?'visit':
+    step.type==='done'?'done':'step');
+
+  document.getElementById('stat-step').textContent    = simIndex+1;
+  document.getElementById('stat-visited').textContent =
+    Object.values(nodeState).filter(v=>v==='visited'||v==='current').length;
+
+  updateDistTable();
+  draw();
+}
+
+function showPath(srcId, tgtId) {
+  // reconstruct path
+  const path = [];
+  let cur = tgtId;
+  while (cur !== null && cur !== undefined) {
+    path.unshift(cur);
+    if (cur === srcId) break;
+    cur = finalPrev[cur];
+    if (path.length > nodes.length) break; // cycle guard
+  }
+
+  if (path[0] !== srcId) {
+    logEntry(`No path from ${getLabel(srcId)} to ${getLabel(tgtId)}`, 'info');
+    return;
+  }
+
+  // color path edges and nodes
+  path.forEach(id => nodeState[id]='path');
+  for (let i=0;i<path.length-1;i++) {
+    const k1=`${path[i]}-${path[i+1]}`;
+    const k2=`${path[i+1]}-${path[i]}`;
+    edgeState[k1]='path'; edgeState[k2]='path';
+  }
+
+  const d = finalDist[tgtId];
+  logEntry(`Path: ${path.map(getLabel).join(' → ')}`, 'path');
+  logEntry(`Total distance: ${d===Infinity?'unreachable':d}`, 'done');
+
+  updateDistTable(path);
+  draw();
+}
+
+function resetViz() {
+  stopSim();
+  nodeState={};edgeState={};dist={};prev={};
+  simSteps=[];simIndex=0;
+  document.getElementById('stat-step').textContent='0';
+  document.getElementById('stat-visited').textContent='0';
+  updateDistTable();
+  draw();
+}
+
+// ════════════════════════════════════════════
+//  DISTANCE TABLE
+// ════════════════════════════════════════════
+function updateDistTable(path=[]) {
+  const tbody = document.getElementById('dist-tbody');
+  tbody.innerHTML = nodes.map(n=>{
+    const d  = dist[n.id];
+    const p  = prev[n.id];
+    const ds = (d===undefined||d===Infinity)?'∞':d;
+    const ps = p!==null&&p!==undefined ? getLabel(p) : '-';
+    const inPath = path.includes(n.id);
+    return `<tr class="${inPath?'path-row':''}">
+      <td>${n.label}</td><td>${ds}</td><td>${ps}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════
+//  MOUSE EVENTS
+// ════════════════════════════════════════════
+function getNodeAt(x,y) {
+  return nodes.find(n=>Math.hypot(n.x-x,n.y-y)<=NODE_R+4);
+}
+
+canvas.addEventListener('mousedown', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx   = e.clientX - rect.left;
+  const my   = e.clientY - rect.top;
+  const hit  = getNodeAt(mx,my);
+
+  if (e.button===2) {
+    // right click = delete node
+    if (hit) {
+      edges  = edges.filter(ed=>ed.from!==hit.id&&ed.to!==hit.id);
+      nodes  = nodes.filter(n=>n.id!==hit.id);
+      // relabel
+      nodes.forEach((n,i)=>n.label=LABELS[i]||String(i));
+      clickFirst=null;
+      populateSelects(); draw();
+    }
+    return;
+  }
+
+  if (hit) {
+    if (clickFirst === null) {
+      // start drag or edge
+      isDragging = true;
+      dragNode   = hit;
+      dragOffX   = mx - hit.x;
+      dragOffY   = my - hit.y;
+      clickFirst = hit.id;
+    } else if (clickFirst === hit.id) {
+      // deselect
+      clickFirst = null; isDragging=false; draw();
+    } else {
+      // add edge between clickFirst and hit
+      const w = parseInt(document.getElementById('edge-weight').value)||Math.floor(Math.random()*15)+1;
+      addEdge(clickFirst, hit.id, w);
+      logEntry(`Edge ${getLabel(clickFirst)} ↔ ${getLabel(hit.id)} [w=${w}]`, 'info');
+      clickFirst = null; isDragging=false; draw();
+    }
+  } else {
+    // click empty = add node
+    if (clickFirst!==null) { clickFirst=null; draw(); return; }
+    addNode(mx,my);
+    logEntry(`Node ${nodes[nodes.length-1].label} added`, 'info');
+  }
+});
+
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx   = e.clientX - rect.left;
+  const my   = e.clientY - rect.top;
+
+  if (isDragging && dragNode) {
+    dragNode.x = mx - dragOffX;
+    dragNode.y = my - dragOffY;
+    draw(); return;
+  }
+
+  // tooltip
+  const hit = getNodeAt(mx,my);
+  const tip  = document.getElementById('tooltip');
+  if (hit) {
+    const d = dist[hit.id];
+    tip.style.display = 'block';
+    tip.style.left    = (e.clientX+12)+'px';
+    tip.style.top     = (e.clientY-10)+'px';
+    tip.textContent   = `Node ${hit.label}  dist=${d===undefined||d===Infinity?'∞':d}`;
+  } else {
+    tip.style.display='none';
+  }
+});
+
+canvas.addEventListener('mouseup', ()=>{ isDragging=false; dragNode=null; });
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+// ════════════════════════════════════════════
+//  LOG
+// ════════════════════════════════════════════
+function logEntry(msg, cls='step') {
+  const log  = document.getElementById('log');
+  const div  = document.createElement('div');
+  div.className = `log-entry ${cls}`;
+  div.textContent = `> ${msg}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+function clearLog() { document.getElementById('log').innerHTML=''; }
+
+// ════════════════════════════════════════════
+//  ALGO SWITCH
+// ════════════════════════════════════════════
+function setAlgo(a) {
+  algo = a;
+  document.getElementById('btn-dijkstra').classList.toggle('active', a==='dijkstra');
+  document.getElementById('btn-bellman').classList.toggle('active',  a==='bellman');
+  resetViz();
+  logEntry(`Algorithm: ${a.toUpperCase()}`, 'info');
+}
+
+function updateSpeed() {
+  simSpeed = parseInt(document.getElementById('speed').value);
+  document.getElementById('speed-label').textContent = simSpeed+'ms';
+  if (simRunning) { stopSim(); runAlgo(); }
+}
+
+// ════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════
+window.addEventListener('load', ()=>{
+  resizeCanvas();
+  generateRandom();
+  logEntry('Welcome to NetRoute Simulator', 'done');
+  logEntry('Click canvas to add nodes', 'info');
+  logEntry('Click two nodes to connect them', 'info');
+  logEntry('Right-click a node to delete it', 'info');
+});
+</script>
+</body>
+</html>
