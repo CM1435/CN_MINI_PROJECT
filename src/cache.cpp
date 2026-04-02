@@ -57,6 +57,17 @@ void LRUCache::put(const std::string& url, const std::string& response, int ttl)
     current_bytes_ += response.size();
 }
 
+bool LRUCache::remove(const std::string& url) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = map_.find(url);
+    if (it == map_.end()) return false;
+    
+    current_bytes_ -= it->second->size;
+    lru_list_.erase(it->second);
+    map_.erase(it);
+    return true;
+}
+
 void LRUCache::evict_one() {
     if (lru_list_.empty()) return;
     auto& last = lru_list_.back();
@@ -150,6 +161,15 @@ void LFUCache::put(const std::string& url, const std::string& response, int ttl)
     min_freq_ = 1;
 }
 
+void LFUCache::reset_ttl(const std::string& url, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = key_map_.find(url);
+    if (it != key_map_.end()) {
+        it->second.entry.inserted_at = std::chrono::steady_clock::now();
+        it->second.entry.ttl_seconds = ttl;
+    }
+}
+
 void LFUCache::increment_freq(const std::string& url) {
     auto& node = key_map_[url];
     int old_freq = node.entry.frequency;
@@ -213,4 +233,60 @@ void LFUCache::print_contents() const {
                   << ", " << node.entry.size / 1024 << " KB]\n";
         if (i > 10) { std::cout << "  ... (showing first 10)\n"; break; }
     }
+}
+
+// ══════════════════════════════════════════════
+//  HybridCache Implementation
+// ══════════════════════════════════════════════
+
+HybridCache::HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats, int threshold)
+    : max_entries_(max_entries), max_bytes_(max_bytes), threshold_T_(threshold), stats_(stats),
+      lru_tier_(max_entries / 2, max_bytes / 2, stats), // Give 50% capacity to LRU
+      lfu_tier_(max_entries / 2, max_bytes / 2, stats)  // Give 50% capacity to LFU
+{}
+
+bool HybridCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 1. Check the LRU Tier
+    if (lru_tier_.get(url, out_response)) {
+        global_freq_[url]++;
+        
+        // Threshold check for graduation
+        if (global_freq_[url] > threshold_T_) {
+            lru_tier_.remove(url);
+            lfu_tier_.put(url, out_response, 300); // Graduate to LFU with fresh TTL
+        }
+        return true;
+    }
+
+    // 2. Check the LFU Tier
+    if (lfu_tier_.get(url, out_response)) {
+        global_freq_[url]++;
+        lfu_tier_.reset_ttl(url, 300); // Reset TTL on hit as per the paper
+        return true;
+    }
+
+    return false;
+}
+
+void HybridCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Paper logic: New items always go into LRU first, frequency starts at 1
+    global_freq_[url] = 1;
+    lru_tier_.put(url, response, ttl); 
+}
+
+void HybridCache::evict_expired() {
+    lru_tier_.evict_expired();
+    lfu_tier_.evict_expired();
+}
+
+size_t HybridCache::size() const { return lru_tier_.size() + lfu_tier_.size(); }
+size_t HybridCache::bytes() const { return lru_tier_.bytes() + lfu_tier_.bytes(); }
+
+void HybridCache::print_contents() const {
+    lru_tier_.print_contents();
+    lfu_tier_.print_contents();
 }

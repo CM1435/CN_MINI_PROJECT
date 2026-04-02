@@ -1,0 +1,1224 @@
+
+
+=== include/cache.h ===
+#pragma once
+#include <string>
+#include <unordered_map>
+#include <list>
+#include <mutex>
+#include <chrono>
+#include <vector>
+#include <iostream>
+
+// ─────────────────────────────────────────────
+//  CacheEntry — one cached HTTP response
+// ─────────────────────────────────────────────
+struct CacheEntry {
+    std::string url;
+    std::string response;       // raw HTTP response bytes
+    size_t      size;           // bytes
+    int         frequency;      // for LFU
+    int         ttl_seconds;    // time-to-live
+    std::chrono::steady_clock::time_point inserted_at;
+    std::chrono::steady_clock::time_point last_accessed;
+
+    CacheEntry() : size(0), frequency(1), ttl_seconds(300) {}
+
+    CacheEntry(const std::string& u, const std::string& r, int ttl = 300)
+        : url(u), response(r), size(r.size()), frequency(1), ttl_seconds(ttl),
+          inserted_at(std::chrono::steady_clock::now()),
+          last_accessed(std::chrono::steady_clock::now()) {}
+
+    bool is_expired() const {
+        auto now = std::chrono::steady_clock::now();
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - inserted_at).count();
+        return age >= ttl_seconds;
+    }
+};
+
+// ─────────────────────────────────────────────
+//  CacheStats — runtime statistics
+// ─────────────────────────────────────────────
+struct CacheStats {
+    long long hits        = 0;
+    long long misses      = 0;
+    long long evictions   = 0;
+    long long total_bytes_served  = 0;
+    long long bytes_saved         = 0;   // bytes served from cache (not fetched)
+    int       active_connections  = 0;
+
+    double hit_ratio() const {
+        long long total = hits + misses;
+        return total == 0 ? 0.0 : (100.0 * hits / total);
+    }
+};
+
+// ─────────────────────────────────────────────
+//  Eviction Policy enum
+// ─────────────────────────────────────────────
+enum class EvictionPolicy { LRU, LFU };
+
+// ─────────────────────────────────────────────
+//  LRUCache
+// ─────────────────────────────────────────────
+class LRUCache {
+public:
+    explicit LRUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
+        : max_entries_(max_entries), max_bytes_(max_bytes),
+          current_bytes_(0), stats_(stats) {}
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    void evict_expired();
+    size_t size() const { return map_.size(); }
+    size_t bytes() const { return current_bytes_; }
+    void   print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    size_t current_bytes_;
+
+    // list front = most recently used
+    std::list<CacheEntry>                                   lru_list_;
+    std::unordered_map<std::string, std::list<CacheEntry>::iterator> map_;
+
+    CacheStats& stats_;
+    mutable std::mutex mutex_;
+
+    void evict_one();
+};
+
+// ─────────────────────────────────────────────
+//  LFUCache
+// ─────────────────────────────────────────────
+class LFUCache {
+public:
+    explicit LFUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
+        : max_entries_(max_entries), max_bytes_(max_bytes),
+          current_bytes_(0), min_freq_(0), stats_(stats) {}
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    void evict_expired();
+    size_t size() const { return key_map_.size(); }
+    size_t bytes() const { return current_bytes_; }
+    void   print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    size_t current_bytes_;
+    int    min_freq_;
+
+    struct Node {
+        CacheEntry entry;
+        std::list<std::string>::iterator it;
+    };
+
+    std::unordered_map<std::string, Node>                      key_map_;
+    std::unordered_map<int, std::list<std::string>>            freq_map_;
+
+    CacheStats& stats_;
+    mutable std::mutex mutex_;
+
+    void increment_freq(const std::string& url);
+    void evict_one();
+};
+
+
+=== include/logger.h ===
+#pragma once
+#include "cache.h"
+#include <string>
+#include <fstream>
+#include <mutex>
+#include <ctime>
+
+// ─────────────────────────────────────────────
+//  Logger — thread-safe file + console logger
+// ─────────────────────────────────────────────
+class Logger {
+public:
+    enum class Level { INFO, WARN, ERROR, DEBUG };
+
+    static Logger& instance() {
+        static Logger inst;
+        return inst;
+    }
+
+    void init(const std::string& logfile, bool verbose = false);
+    void log(Level level, const std::string& msg);
+    void info (const std::string& msg) { log(Level::INFO,  msg); }
+    void warn (const std::string& msg) { log(Level::WARN,  msg); }
+    void error(const std::string& msg) { log(Level::ERROR, msg); }
+    void debug(const std::string& msg) { if(verbose_) log(Level::DEBUG, msg); }
+
+private:
+    Logger() = default;
+    std::ofstream  file_;
+    std::mutex     mutex_;
+    bool           verbose_ = false;
+
+    std::string timestamp();
+    std::string level_str(Level l);
+};
+
+// ─────────────────────────────────────────────
+//  StatsDisplay — prints live stats to terminal
+// ─────────────────────────────────────────────
+class StatsDisplay {
+public:
+    static void print_banner();
+    static void print_stats(const CacheStats& stats, size_t cache_entries, size_t cache_bytes);
+    static void print_separator();
+    static std::string format_bytes(size_t bytes);
+};
+
+
+=== include/proxy.h ===
+#pragma once
+#include "cache.h"
+#include <string>
+#include <atomic>
+#include <set>
+
+// ─────────────────────────────────────────────
+//  ProxyConfig — runtime configuration
+// ─────────────────────────────────────────────
+struct ProxyConfig {
+    int           port           = 8080;
+    size_t        max_entries    = 500;
+    size_t        max_bytes      = 50 * 1024 * 1024;  // 50 MB
+    int           default_ttl    = 300;               // seconds
+    EvictionPolicy policy        = EvictionPolicy::LRU;
+    bool          verbose        = false;
+    std::set<std::string> blacklist;                  // blocked domains
+};
+
+// ─────────────────────────────────────────────
+//  HttpRequest — parsed HTTP request
+// ─────────────────────────────────────────────
+struct HttpRequest {
+    std::string method;
+    std::string url;
+    std::string host;
+    int         port = 80;
+    std::string path;
+    std::string raw;
+    bool        valid = false;
+};
+
+// ─────────────────────────────────────────────
+//  ProxyServer
+// ─────────────────────────────────────────────
+class ProxyServer {
+public:
+    explicit ProxyServer(const ProxyConfig& cfg);
+    ~ProxyServer();
+
+    void start();    // blocking — runs accept loop
+    void stop();
+
+    const CacheStats& stats() const { return stats_; }
+
+    // connection handler (runs in its own thread — public for pthread access)
+    void handle_client(int client_fd);
+
+private:
+    ProxyConfig   cfg_;
+    CacheStats    stats_;
+    LRUCache      lru_cache_;
+    LFUCache      lfu_cache_;
+    int           server_fd_ = -1;
+    std::atomic<bool> running_{false};
+
+    // HTTP helpers
+    HttpRequest   parse_request(const std::string& raw);
+    std::string   fetch_from_origin(const HttpRequest& req);
+    int           parse_ttl_from_headers(const std::string& response);
+    bool          is_cacheable(const HttpRequest& req, const std::string& response);
+    bool          is_blacklisted(const std::string& host);
+
+    // cache dispatch (LRU or LFU based on config)
+    bool cache_get(const std::string& url, std::string& out);
+    void cache_put(const std::string& url, const std::string& resp, int ttl);
+
+    // socket helpers
+    int  create_server_socket();
+    int  connect_to_host(const std::string& host, int port);
+    void send_all(int fd, const std::string& data);
+    std::string recv_all(int fd);
+    std::string recv_http_response(int fd);
+
+    // logging
+    void log(const std::string& msg) const;
+    void log_request(const HttpRequest& req, bool cache_hit, size_t bytes) const;
+};
+
+
+=== include/stats_writer.h ===
+#pragma once
+
+// Windows socket headers must come first to avoid conflicts
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
+    #include <winsock2.h>
+    #include <windows.h>
+#endif
+
+#include <string>
+#include <fstream>
+#include <mutex>
+#include <deque>
+#include <vector>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <algorithm>
+
+#include "cache.h"
+
+// ─────────────────────────────────────────────
+//  RecentRequest — one logged request entry
+// ─────────────────────────────────────────────
+struct RecentRequest {
+    std::string url;
+    bool        hit;
+    size_t      size;
+    std::string time;
+};
+
+// ─────────────────────────────────────────────
+//  StatsWriter
+// ─────────────────────────────────────────────
+class StatsWriter {
+public:
+    static StatsWriter& instance() {
+        static StatsWriter inst;
+        return inst;
+    }
+
+    void set_output_path(const std::string& path) {
+        path_ = path;
+    }
+
+    void log_request(const std::string& url, bool hit, size_t size) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        std::time_t now = std::time(nullptr);
+        struct tm* tm_info = std::localtime(&now);
+        char buf[12];
+        std::strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+
+        RecentRequest r;
+        r.url  = url;
+        r.hit  = hit;
+        r.size = size;
+        r.time = std::string(buf);
+
+        recent_.push_front(r);
+        if (recent_.size() > 20) {
+            recent_.pop_back();
+        }
+    }
+
+    void write(const CacheStats& stats,
+               size_t cache_entries,
+               size_t cache_bytes,
+               size_t max_entries,
+               size_t max_bytes,
+               const std::string& policy)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        std::ofstream f(path_);
+        if (!f.is_open()) return;
+
+        f << "{\n";
+        f << "  \"hits\":"                << stats.hits               << ",\n";
+        f << "  \"misses\":"              << stats.misses             << ",\n";
+        f << "  \"evictions\":"           << stats.evictions          << ",\n";
+        f << "  \"active_connections\":"  << stats.active_connections << ",\n";
+        f << "  \"bytes_saved\":"         << stats.bytes_saved        << ",\n";
+        f << "  \"total_bytes_served\":"  << stats.total_bytes_served << ",\n";
+        f << "  \"cache_entries\":"       << cache_entries            << ",\n";
+        f << "  \"cache_bytes\":"         << cache_bytes              << ",\n";
+        f << "  \"max_entries\":"         << max_entries              << ",\n";
+        f << "  \"max_bytes\":"           << max_bytes                << ",\n";
+        f << "  \"policy\":\""            << policy                   << "\",\n";
+        f << "  \"recent_requests\": [\n";
+
+        bool first = true;
+        for (size_t i = 0; i < recent_.size(); i++) {
+            const RecentRequest& r = recent_[i];
+            if (!first) f << ",\n";
+            f << "    {"
+              << "\"url\":\""  << escape(r.url) << "\","
+              << "\"hit\":"    << (r.hit ? "true" : "false") << ","
+              << "\"size\":"   << r.size << ","
+              << "\"time\":\"" << r.time << "\""
+              << "}";
+            first = false;
+        }
+
+        f << "\n  ]\n}\n";
+        f.flush();
+        f.close();
+    }
+
+private:
+    StatsWriter() : path_("stats.json") {}
+
+    std::string               path_;
+    std::mutex                mutex_;
+    std::deque<RecentRequest> recent_;
+
+    std::string escape(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) {
+            char c = s[i];
+            if (c == '"'  ) { out += "\\\""; continue; }
+            if (c == '\\' ) { out += "\\\\"; continue; }
+            out += c;
+        }
+        return out;
+    }
+};
+
+
+=== src/cache.cpp ===
+#include "../include/cache.h"
+#include <algorithm>
+
+// ══════════════════════════════════════════════
+//  LRUCache Implementation
+// ══════════════════════════════════════════════
+
+bool LRUCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = map_.find(url);
+    if (it == map_.end()) {
+        stats_.misses++;
+        return false;
+    }
+
+    // check TTL expiry
+    if (it->second->is_expired()) {
+        current_bytes_ -= it->second->size;
+        lru_list_.erase(it->second);
+        map_.erase(it);
+        stats_.misses++;
+        stats_.evictions++;
+        return false;
+    }
+
+    // move to front (most recently used)
+    it->second->last_accessed = std::chrono::steady_clock::now();
+    lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+
+    out_response = it->second->response;
+    stats_.hits++;
+    stats_.bytes_saved += it->second->size;
+    return true;
+}
+
+void LRUCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // if already exists, remove old entry
+    auto it = map_.find(url);
+    if (it != map_.end()) {
+        current_bytes_ -= it->second->size;
+        lru_list_.erase(it->second);
+        map_.erase(it);
+    }
+
+    // evict if over limits
+    while (!lru_list_.empty() &&
+           (map_.size() >= max_entries_ || current_bytes_ + response.size() > max_bytes_)) {
+        evict_one();
+    }
+
+    CacheEntry entry(url, response, ttl);
+    lru_list_.push_front(entry);
+    map_[url] = lru_list_.begin();
+    current_bytes_ += response.size();
+}
+
+void LRUCache::evict_one() {
+    if (lru_list_.empty()) return;
+    auto& last = lru_list_.back();
+    current_bytes_ -= last.size;
+    map_.erase(last.url);
+    lru_list_.pop_back();
+    stats_.evictions++;
+}
+
+void LRUCache::evict_expired() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = lru_list_.begin(); it != lru_list_.end(); ) {
+        if (it->is_expired()) {
+            current_bytes_ -= it->size;
+            map_.erase(it->url);
+            it = lru_list_.erase(it);
+            stats_.evictions++;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void LRUCache::print_contents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::cout << "\n[LRU Cache Contents — " << map_.size() << " entries, "
+              << current_bytes_ / 1024 << " KB]\n";
+    int i = 1;
+    for (const auto& e : lru_list_) {
+        std::cout << "  " << i++ << ". " << e.url
+                  << " [" << e.size / 1024 << " KB, TTL=" << e.ttl_seconds << "s]\n";
+        if (i > 10) { std::cout << "  ... (showing first 10)\n"; break; }
+    }
+}
+
+// ══════════════════════════════════════════════
+//  LFUCache Implementation
+// ══════════════════════════════════════════════
+
+bool LFUCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = key_map_.find(url);
+    if (it == key_map_.end()) {
+        stats_.misses++;
+        return false;
+    }
+
+    if (it->second.entry.is_expired()) {
+        // remove from freq_map
+        int freq = it->second.entry.frequency;
+        freq_map_[freq].erase(it->second.it);
+        if (freq_map_[freq].empty()) freq_map_.erase(freq);
+        current_bytes_ -= it->second.entry.size;
+        key_map_.erase(it);
+        stats_.misses++;
+        stats_.evictions++;
+        return false;
+    }
+
+    increment_freq(url);
+    out_response = key_map_[url].entry.response;
+    stats_.hits++;
+    stats_.bytes_saved += key_map_[url].entry.size;
+    return true;
+}
+
+void LFUCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (key_map_.count(url)) {
+        key_map_[url].entry.response = response;
+        key_map_[url].entry.size     = response.size();
+        increment_freq(url);
+        return;
+    }
+
+    while (!key_map_.empty() &&
+           (key_map_.size() >= max_entries_ || current_bytes_ + response.size() > max_bytes_)) {
+        evict_one();
+    }
+
+    CacheEntry entry(url, response, ttl);
+    entry.frequency = 1;
+
+    freq_map_[1].push_back(url);
+    auto list_it = std::prev(freq_map_[1].end());
+
+    key_map_[url] = { entry, list_it };
+    current_bytes_ += response.size();
+    min_freq_ = 1;
+}
+
+void LFUCache::increment_freq(const std::string& url) {
+    auto& node = key_map_[url];
+    int old_freq = node.entry.frequency;
+    int new_freq = old_freq + 1;
+
+    // remove from old freq bucket
+    freq_map_[old_freq].erase(node.it);
+    if (freq_map_[old_freq].empty()) {
+        freq_map_.erase(old_freq);
+        if (min_freq_ == old_freq) min_freq_ = new_freq;
+    }
+
+    // insert into new freq bucket
+    freq_map_[new_freq].push_back(url);
+    node.it = std::prev(freq_map_[new_freq].end());
+    node.entry.frequency = new_freq;
+    node.entry.last_accessed = std::chrono::steady_clock::now();
+}
+
+void LFUCache::evict_one() {
+    if (key_map_.empty()) return;
+    auto& min_list = freq_map_[min_freq_];
+    if (min_list.empty()) return;
+
+    std::string evict_url = min_list.front();
+    min_list.pop_front();
+    if (min_list.empty()) freq_map_.erase(min_freq_);
+
+    current_bytes_ -= key_map_[evict_url].entry.size;
+    key_map_.erase(evict_url);
+    stats_.evictions++;
+}
+
+void LFUCache::evict_expired() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> to_remove;
+
+    for (auto& [url, node] : key_map_) {
+        if (node.entry.is_expired()) to_remove.push_back(url);
+    }
+
+    for (const auto& url : to_remove) {
+        auto& node = key_map_[url];
+        int freq = node.entry.frequency;
+        freq_map_[freq].erase(node.it);
+        if (freq_map_[freq].empty()) freq_map_.erase(freq);
+        current_bytes_ -= node.entry.size;
+        key_map_.erase(url);
+        stats_.evictions++;
+    }
+}
+
+void LFUCache::print_contents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::cout << "\n[LFU Cache Contents — " << key_map_.size() << " entries, "
+              << current_bytes_ / 1024 << " KB]\n";
+    int i = 1;
+    for (const auto& [url, node] : key_map_) {
+        std::cout << "  " << i++ << ". " << url
+                  << " [freq=" << node.entry.frequency
+                  << ", " << node.entry.size / 1024 << " KB]\n";
+        if (i > 10) { std::cout << "  ... (showing first 10)\n"; break; }
+    }
+}
+
+
+=== src/logger.cpp ===
+#include "../include/logger.h"
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+
+// ══════════════════════════════════════════════
+//  Logger
+// ══════════════════════════════════════════════
+
+void Logger::init(const std::string& logfile, bool verbose) {
+    verbose_ = verbose;
+    file_.open(logfile, std::ios::app);
+    if (!file_.is_open()) {
+        std::cerr << "[Logger] WARNING: Could not open log file: " << logfile << "\n";
+    }
+}
+
+void Logger::log(Level level, const std::string& msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string line = "[" + timestamp() + "] [" + level_str(level) + "] " + msg;
+    std::cout << line << "\n";
+    if (file_.is_open()) file_ << line << "\n" << std::flush;
+}
+
+std::string Logger::timestamp() {
+    auto now  = std::time(nullptr);
+    auto* tm  = std::localtime(&now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm);
+    return std::string(buf);
+}
+
+std::string Logger::level_str(Level l) {
+    switch (l) {
+        case Level::INFO:  return " INFO";
+        case Level::WARN:  return " WARN";
+        case Level::ERROR: return "ERROR";
+        case Level::DEBUG: return "DEBUG";
+        default:           return "     ";
+    }
+}
+
+// ══════════════════════════════════════════════
+//  StatsDisplay
+// ══════════════════════════════════════════════
+
+void StatsDisplay::print_banner() {
+    std::cout << "\n";
+    std::cout << "****************************************************\n";
+    std::cout << "*       HTTP Proxy Cache Server  --  C++           *\n";
+    std::cout << "*       LRU / LFU  |  Multi-Threaded               *\n";
+    std::cout << "****************************************************\n\n";
+}
+
+void StatsDisplay::print_stats(const CacheStats& s, size_t entries, size_t bytes) {
+    std::cout << "\n+---------------------- CACHE STATS ----------------------+\n";
+    std::cout << "|  Hits:              " << std::setw(10) << s.hits
+              << "                          |\n";
+    std::cout << "|  Misses:            " << std::setw(10) << s.misses
+              << "                          |\n";
+    std::cout << "|  Hit Ratio:         " << std::setw(9)  << std::fixed
+              << std::setprecision(1)     << s.hit_ratio()
+              << "%                         |\n";
+    std::cout << "|  Evictions:         " << std::setw(10) << s.evictions
+              << "                          |\n";
+    std::cout << "|  Bandwidth Saved:   " << std::setw(10) << format_bytes(s.bytes_saved)
+              << "                  |\n";
+    std::cout << "|  Active Conns:      " << std::setw(10) << s.active_connections
+              << "                       |\n";
+    std::cout << "|  Cache Entries:     " << std::setw(10) << entries
+              << "                          |\n";
+    std::cout << "|  Cache Size:        " << std::setw(10) << format_bytes(bytes)
+              << "                     |\n";
+    std::cout << "+---------------------------------------------------------+\n";
+}
+
+void StatsDisplay::print_separator() {
+    std::cout << "---------------------------------------------------------\n";
+}
+
+std::string StatsDisplay::format_bytes(size_t bytes) {
+    std::ostringstream oss;
+    if (bytes >= 1024 * 1024)
+        oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0)) << " MB";
+    else if (bytes >= 1024)
+        oss << std::fixed << std::setprecision(1) << (bytes / 1024.0) << " KB";
+    else
+        oss << bytes << " B";
+    return oss.str();
+}
+
+
+=== src/main.cpp ===
+#include "../include/proxy.h"
+#include "../include/logger.h"
+#include <iostream>
+#include <csignal>
+#include <string>
+
+// ─────────────────────────────────────────────
+//  Global proxy pointer for signal handler
+// ─────────────────────────────────────────────
+static ProxyServer* g_proxy = nullptr;
+
+void signal_handler(int sig) {
+    std::cout << "\n[SIGNAL] Caught signal " << sig << " — shutting down...\n";
+    if (g_proxy) g_proxy->stop();
+    std::exit(0);
+}
+
+// ─────────────────────────────────────────────
+//  Usage
+// ─────────────────────────────────────────────
+void print_usage(const char* prog) {
+    std::cout << "\nUsage: " << prog << " [OPTIONS]\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  -p <port>         Port to listen on          (default: 8080)\n";
+    std::cout << "  -e <entries>      Max cache entries           (default: 500)\n";
+    std::cout << "  -m <MB>           Max cache size in MB        (default: 50)\n";
+    std::cout << "  -t <seconds>      Default TTL in seconds      (default: 300)\n";
+    std::cout << "  -P <lru|lfu>      Eviction policy             (default: lru)\n";
+    std::cout << "  -b <domain>       Blacklist a domain          (repeatable)\n";
+    std::cout << "  -v                Verbose / debug logging\n";
+    std::cout << "  -h                Show this help\n\n";
+    std::cout << "Examples:\n";
+    std::cout << "  " << prog << " -p 8080 -P lru -m 100 -t 600\n";
+    std::cout << "  " << prog << " -p 3128 -P lfu -b ads.example.com -v\n\n";
+}
+
+// ─────────────────────────────────────────────
+//  main
+// ─────────────────────────────────────────────
+int main(int argc, char* argv[]) {
+    ProxyConfig cfg;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_usage(argv[0]);
+            return 0;
+        }
+        else if (arg == "-p" && i + 1 < argc) {
+            cfg.port = std::stoi(argv[++i]);
+        }
+        else if (arg == "-e" && i + 1 < argc) {
+            cfg.max_entries = std::stoul(argv[++i]);
+        }
+        else if (arg == "-m" && i + 1 < argc) {
+            cfg.max_bytes = std::stoul(argv[++i]) * 1024 * 1024;
+        }
+        else if (arg == "-t" && i + 1 < argc) {
+            cfg.default_ttl = std::stoi(argv[++i]);
+        }
+        else if (arg == "-P" && i + 1 < argc) {
+            std::string pol = argv[++i];
+            cfg.policy = (pol == "lfu") ? EvictionPolicy::LFU : EvictionPolicy::LRU;
+        }
+        else if (arg == "-b" && i + 1 < argc) {
+            cfg.blacklist.insert(argv[++i]);
+        }
+        else if (arg == "-v") {
+            cfg.verbose = true;
+        }
+        else {
+            std::cerr << "Unknown option: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    // init logger
+    Logger::instance().init("proxy.log", cfg.verbose);
+
+    // signal handling (no SIGPIPE on Windows)
+    std::signal(SIGINT,  signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    // start proxy
+    ProxyServer proxy(cfg);
+    g_proxy = &proxy;
+    proxy.start();
+
+    return 0;
+}
+
+
+=== src/proxy.cpp ===
+#include "../include/proxy.h"
+#include "../include/logger.h"
+#include "../include/stats_writer.h"
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #include <windows.h>
+    #pragma comment(lib, "ws2_32.lib")
+    #define close(s) closesocket(s)
+    #define MSG_NOSIGNAL 0
+    typedef int socklen_t;
+#else
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <netinet/in.h>
+    #include <netdb.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
+#endif
+
+#include <thread>
+#include <cstring>
+#include <sstream>
+#include <regex>
+#include <algorithm>
+#include <string>
+
+#define RECV_BUFFER     8192
+#define CONNECT_TIMEOUT 10
+
+// ══════════════════════════════════════════════
+//  ProxyServer Constructor / Destructor
+// ══════════════════════════════════════════════
+
+ProxyServer::ProxyServer(const ProxyConfig& cfg)
+    : cfg_(cfg),
+      lru_cache_(cfg.max_entries, cfg.max_bytes, stats_),
+      lfu_cache_(cfg.max_entries, cfg.max_bytes, stats_) {}
+
+ProxyServer::~ProxyServer() {
+    stop();
+}
+
+void ProxyServer::stop() {
+    running_ = false;
+    if (server_fd_ != -1) {
+        close(server_fd_);
+        server_fd_ = -1;
+    }
+}
+
+// ══════════════════════════════════════════════
+//  start() — main accept loop
+// ══════════════════════════════════════════════
+
+void ProxyServer::start() {
+
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        Logger::instance().error("WSAStartup failed");
+        return;
+    }
+#endif
+
+    server_fd_ = create_server_socket();
+    if (server_fd_ < 0) {
+        Logger::instance().error("Failed to create server socket");
+        return;
+    }
+
+    running_ = true;
+    StatsDisplay::print_banner();
+    Logger::instance().info("Proxy listening on port " + std::to_string(cfg_.port));
+    Logger::instance().info("Policy: " + std::string(cfg_.policy == EvictionPolicy::LRU ? "LRU" : "LFU"));
+    Logger::instance().info("Max entries: " + std::to_string(cfg_.max_entries) +
+                            " | Max size: " + StatsDisplay::format_bytes(cfg_.max_bytes));
+
+    // periodic TTL cleanup thread
+    std::thread([this]() {
+        while (running_) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            lru_cache_.evict_expired();
+            lfu_cache_.evict_expired();
+            Logger::instance().debug("TTL cleanup pass done");
+        }
+    }).detach();
+
+    // periodic stats thread
+    // std::thread([this]() {
+    //     while (running_) {
+    //         std::this_thread::sleep_for(std::chrono::seconds(60));
+    //         size_t entries = (cfg_.policy == EvictionPolicy::LRU)
+    //                          ? lru_cache_.size() : lfu_cache_.size();
+    //         size_t bytes   = (cfg_.policy == EvictionPolicy::LRU)
+    //                          ? lru_cache_.bytes() : lfu_cache_.bytes();
+    //         StatsDisplay::print_stats(stats_, entries, bytes);
+    //     }
+    // }).detach();
+    
+    std::thread([this]() {
+    while (running_) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        size_t entries = (cfg_.policy == EvictionPolicy::LRU)
+                         ? lru_cache_.size() : lfu_cache_.size();
+        size_t bytes   = (cfg_.policy == EvictionPolicy::LRU)
+                         ? lru_cache_.bytes() : lfu_cache_.bytes();
+        StatsDisplay::print_stats(stats_, entries, bytes);
+
+        // ADD THESE LINES — write stats.json for dashboard:
+        std::string pol = (cfg_.policy == EvictionPolicy::LRU) ? "LRU" : "LFU";
+        StatsWriter::instance().write(
+            stats_, entries, bytes,
+            cfg_.max_entries, cfg_.max_bytes, pol
+        );
+    }
+    }).detach();
+
+    // main accept loop
+    while (running_) {
+        sockaddr_in client_addr{};
+        socklen_t   client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd_, (sockaddr*)&client_addr, &client_len);
+
+        if (client_fd < 0) {
+            if (running_) Logger::instance().warn("accept() failed");
+            continue;
+        }
+
+        stats_.active_connections++;
+
+        // spawn a detached thread per client
+        std::thread([this, client_fd]() {
+            handle_client(client_fd);
+        }).detach();
+    }
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+// ══════════════════════════════════════════════
+//  handle_client — runs per connection thread
+// ══════════════════════════════════════════════
+
+void ProxyServer::handle_client(int client_fd) {
+
+    std::string raw = recv_all(client_fd);
+    if (raw.empty()) {
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    HttpRequest req = parse_request(raw);
+    if (!req.valid) {
+        Logger::instance().warn("Invalid request — dropping");
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    // blacklist check
+    if (is_blacklisted(req.host)) {
+        std::string blocked =
+            "HTTP/1.1 403 Forbidden\r\n"
+            "Content-Type: text/html\r\n\r\n"
+            "<h1>403 Forbidden</h1><p>Domain blocked by proxy.</p>";
+        send_all(client_fd, blocked);
+        Logger::instance().warn("BLOCKED: " + req.host);
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    std::string response;
+    bool hit = false;
+
+    if (req.method == "GET") {
+        hit = cache_get(req.url, response);
+    }
+
+    if (!hit) {
+        response = fetch_from_origin(req);
+        if (response.empty()) {
+            std::string err =
+                "HTTP/1.1 502 Bad Gateway\r\n"
+                "Content-Type: text/html\r\n\r\n"
+                "<h1>502 Bad Gateway</h1><p>Could not reach origin.</p>";
+            send_all(client_fd, err);
+            close(client_fd);
+            stats_.active_connections--;
+            return;
+        }
+        if (req.method == "GET" && is_cacheable(req, response)) {
+            int ttl = parse_ttl_from_headers(response);
+            cache_put(req.url, response, ttl);
+        }
+    }
+
+    log_request(req, hit, response.size());
+    stats_.total_bytes_served += response.size();
+    send_all(client_fd, response);
+    close(client_fd);
+    stats_.active_connections--;
+}
+
+// ══════════════════════════════════════════════
+//  HTTP Parsing
+// ══════════════════════════════════════════════
+
+HttpRequest ProxyServer::parse_request(const std::string& raw) {
+    HttpRequest req;
+    req.raw = raw;
+
+    std::istringstream stream(raw);
+    std::string line;
+    if (!std::getline(stream, line)) return req;
+
+    std::istringstream first_line(line);
+    std::string url_str;
+    first_line >> req.method >> url_str;
+    if (req.method.empty() || url_str.empty()) return req;
+
+    if (url_str.substr(0, 7) == "http://")  url_str = url_str.substr(7);
+    if (url_str.substr(0, 8) == "https://") url_str = url_str.substr(8);
+
+    auto slash = url_str.find('/');
+    std::string host_port = (slash != std::string::npos) ? url_str.substr(0, slash) : url_str;
+    req.path = (slash != std::string::npos) ? url_str.substr(slash) : "/";
+
+    auto colon = host_port.find(':');
+    if (colon != std::string::npos) {
+        req.host = host_port.substr(0, colon);
+        try { req.port = std::stoi(host_port.substr(colon + 1)); }
+        catch (...) { req.port = 80; }
+    } else {
+        req.host = host_port;
+        req.port = 80;
+    }
+
+    while (std::getline(stream, line)) {
+        if (line.find("Host:") == 0 || line.find("host:") == 0) {
+            auto val = line.substr(line.find(':') + 1);
+            val.erase(0, val.find_first_not_of(" \t\r\n"));
+            val.erase(val.find_last_not_of(" \t\r\n") + 1);
+            if (req.host.empty()) req.host = val;
+        }
+    }
+
+    if (req.host.empty()) return req;
+    req.url   = "http://" + req.host + req.path;
+    req.valid = true;
+    return req;
+}
+
+// ══════════════════════════════════════════════
+//  Origin Fetch
+// ══════════════════════════════════════════════
+
+std::string ProxyServer::fetch_from_origin(const HttpRequest& req) {
+    int sock = connect_to_host(req.host, req.port);
+    if (sock < 0) {
+        Logger::instance().error("Cannot connect to " + req.host);
+        return "";
+    }
+
+    std::string forward =
+        req.method + " " + req.path + " HTTP/1.0\r\n" +
+        "Host: " + req.host + "\r\n" +
+        "Connection: close\r\n" +
+        "User-Agent: ProxyCache/1.0\r\n\r\n";
+
+    send_all(sock, forward);
+    std::string response = recv_http_response(sock);
+    close(sock);
+    return response;
+}
+
+// ══════════════════════════════════════════════
+//  Header Helpers
+// ══════════════════════════════════════════════
+
+int ProxyServer::parse_ttl_from_headers(const std::string& response) {
+    std::regex cc_regex("Cache-Control:.*?max-age=(\\d+)", std::regex::icase);
+    std::smatch match;
+    if (std::regex_search(response, match, cc_regex)) {
+        try { return std::stoi(match[1].str()); }
+        catch (...) {}
+    }
+    return cfg_.default_ttl;
+}
+
+bool ProxyServer::is_cacheable(const HttpRequest& req, const std::string& response) {
+    if (req.method != "GET") return false;
+    if (response.find("no-store") != std::string::npos) return false;
+    if (response.find("no-cache") != std::string::npos) return false;
+    if (response.find("HTTP/1.0 200") == std::string::npos &&
+        response.find("HTTP/1.1 200") == std::string::npos) return false;
+    return true;
+}
+
+bool ProxyServer::is_blacklisted(const std::string& host) {
+    for (const auto& domain : cfg_.blacklist) {
+        if (host.find(domain) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// ══════════════════════════════════════════════
+//  Cache Dispatch
+// ══════════════════════════════════════════════
+
+bool ProxyServer::cache_get(const std::string& url, std::string& out) {
+    if (cfg_.policy == EvictionPolicy::LRU) return lru_cache_.get(url, out);
+    return lfu_cache_.get(url, out);
+}
+
+void ProxyServer::cache_put(const std::string& url, const std::string& resp, int ttl) {
+    if (cfg_.policy == EvictionPolicy::LRU) lru_cache_.put(url, resp, ttl);
+    else lfu_cache_.put(url, resp, ttl);
+}
+
+// ══════════════════════════════════════════════
+//  Socket Helpers
+// ══════════════════════════════════════════════
+
+int ProxyServer::create_server_socket() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(cfg_.port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
+    if (listen(fd, 128) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+int ProxyServer::connect_to_host(const std::string& host, int port) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0)
+        return -1;
+
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return -1; }
+
+    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+        close(sock); freeaddrinfo(res); return -1;
+    }
+
+    freeaddrinfo(res);
+    return sock;
+}
+
+void ProxyServer::send_all(int fd, const std::string& data) {
+    size_t total = 0;
+    while (total < data.size()) {
+        int sent = send(fd, data.c_str() + total, (int)(data.size() - total), 0);
+        if (sent <= 0) break;
+        total += sent;
+    }
+}
+
+std::string ProxyServer::recv_all(int fd) {
+    std::string result;
+    char buf[RECV_BUFFER];
+    int n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        result.append(buf, n);
+        if (result.find("\r\n\r\n") != std::string::npos) break;
+    }
+    return result;
+}
+
+std::string ProxyServer::recv_http_response(int fd) {
+    std::string result;
+    char buf[RECV_BUFFER];
+    int n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        result.append(buf, n);
+    }
+    return result;
+}
+
+// ══════════════════════════════════════════════
+//  Logging
+// ══════════════════════════════════════════════
+
+void ProxyServer::log(const std::string& msg) const {
+    Logger::instance().info(msg);
+}
+
+// void ProxyServer::log_request(const HttpRequest& req, bool hit, size_t bytes) const {
+//     std::string status = hit ? "[HIT] " : "[MISS]";
+//     std::string msg    = status + " " + req.method + " " + req.url +
+//                          " — " + StatsDisplay::format_bytes(bytes);
+//     Logger::instance().info(msg);
+// }
+
+void ProxyServer::log_request(const HttpRequest& req, bool hit, size_t bytes) const {
+    std::string status = hit ? "[HIT] " : "[MISS]";
+    std::string msg    = status + " " + req.method + " " + req.url +
+                         " — " + StatsDisplay::format_bytes(bytes);
+    Logger::instance().info(msg);
+
+    // ADD THIS LINE:
+    StatsWriter::instance().log_request(req.url, hit, bytes);
+}

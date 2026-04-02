@@ -53,7 +53,7 @@ struct CacheStats {
 // ─────────────────────────────────────────────
 //  Eviction Policy enum
 // ─────────────────────────────────────────────
-enum class EvictionPolicy { LRU, LFU };
+enum class EvictionPolicy { LRU, LFU, HYBRID };
 
 // ─────────────────────────────────────────────
 //  LRUCache
@@ -66,6 +66,7 @@ public:
 
     bool get(const std::string& url, std::string& out_response);
     void put(const std::string& url, const std::string& response, int ttl = 300);
+    bool remove(const std::string& url); // Added for Hybrid support
     void evict_expired();
     size_t size() const { return map_.size(); }
     size_t bytes() const { return current_bytes_; }
@@ -97,6 +98,7 @@ public:
 
     bool get(const std::string& url, std::string& out_response);
     void put(const std::string& url, const std::string& response, int ttl = 300);
+    void reset_ttl(const std::string& url, int ttl); // Added for Hybrid support
     void evict_expired();
     size_t size() const { return key_map_.size(); }
     size_t bytes() const { return current_bytes_; }
@@ -121,4 +123,32 @@ private:
 
     void increment_freq(const std::string& url);
     void evict_one();
+};
+
+// ─────────────────────────────────────────────
+//  HybridCache (IEEE Paper Implementation)
+// ─────────────────────────────────────────────
+class HybridCache {
+public:
+    HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats, int threshold = 5);
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    void evict_expired();
+    size_t size() const;
+    size_t bytes() const;
+    void print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    int threshold_T_;
+    CacheStats& stats_;
+
+    // The paper specifies splitting the cache into LRU (Size P) and LFU (Size Q)
+    LRUCache lru_tier_;
+    LFUCache lfu_tier_;
+
+    std::unordered_map<std::string, int> global_freq_;
+    mutable std::mutex mutex_;
 };

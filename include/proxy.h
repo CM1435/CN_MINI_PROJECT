@@ -51,6 +51,7 @@ private:
     CacheStats    stats_;
     LRUCache      lru_cache_;
     LFUCache      lfu_cache_;
+    HybridCache   hybrid_cache_;
     int           server_fd_ = -1;
     std::atomic<bool> running_{false};
 

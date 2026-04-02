@@ -22,15 +22,15 @@ void print_usage(const char* prog) {
     std::cout << "\nUsage: " << prog << " [OPTIONS]\n\n";
     std::cout << "Options:\n";
     std::cout << "  -p <port>         Port to listen on          (default: 8080)\n";
-    std::cout << "  -e <entries>      Max cache entries           (default: 500)\n";
-    std::cout << "  -m <MB>           Max cache size in MB        (default: 50)\n";
-    std::cout << "  -t <seconds>      Default TTL in seconds      (default: 300)\n";
-    std::cout << "  -P <lru|lfu>      Eviction policy             (default: lru)\n";
-    std::cout << "  -b <domain>       Blacklist a domain          (repeatable)\n";
+    std::cout << "  -e <entries>      Max cache entries          (default: 500)\n";
+    std::cout << "  -m <MB>           Max cache size in MB       (default: 50)\n";
+    std::cout << "  -t <seconds>      Default TTL in seconds     (default: 300)\n";
+    std::cout << "  -P <lru|lfu|hybrid> Eviction policy        (default: lru)\n";
+    std::cout << "  -b <domain>       Blacklist a domain         (repeatable)\n";
     std::cout << "  -v                Verbose / debug logging\n";
     std::cout << "  -h                Show this help\n\n";
     std::cout << "Examples:\n";
-    std::cout << "  " << prog << " -p 8080 -P lru -m 100 -t 600\n";
+    std::cout << "  " << prog << " -p 8080 -P hybrid -m 100 -t 600\n";
     std::cout << "  " << prog << " -p 3128 -P lfu -b ads.example.com -v\n\n";
 }
 
@@ -61,7 +61,9 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "-P" && i + 1 < argc) {
             std::string pol = argv[++i];
-            cfg.policy = (pol == "lfu") ? EvictionPolicy::LFU : EvictionPolicy::LRU;
+            if (pol == "lfu") cfg.policy = EvictionPolicy::LFU;
+            else if (pol == "hybrid") cfg.policy = EvictionPolicy::HYBRID;
+            else cfg.policy = EvictionPolicy::LRU;
         }
         else if (arg == "-b" && i + 1 < argc) {
             cfg.blacklist.insert(argv[++i]);

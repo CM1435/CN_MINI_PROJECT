@@ -37,7 +37,8 @@
 ProxyServer::ProxyServer(const ProxyConfig& cfg)
     : cfg_(cfg),
       lru_cache_(cfg.max_entries, cfg.max_bytes, stats_),
-      lfu_cache_(cfg.max_entries, cfg.max_bytes, stats_) {}
+      lfu_cache_(cfg.max_entries, cfg.max_bytes, stats_),
+      hybrid_cache_(cfg.max_entries, cfg.max_bytes, stats_) {}
 
 ProxyServer::~ProxyServer() {
     stop();
@@ -74,7 +75,13 @@ void ProxyServer::start() {
     running_ = true;
     StatsDisplay::print_banner();
     Logger::instance().info("Proxy listening on port " + std::to_string(cfg_.port));
-    Logger::instance().info("Policy: " + std::string(cfg_.policy == EvictionPolicy::LRU ? "LRU" : "LFU"));
+    
+    std::string pol_str;
+    if (cfg_.policy == EvictionPolicy::LRU) pol_str = "LRU";
+    else if (cfg_.policy == EvictionPolicy::LFU) pol_str = "LFU";
+    else pol_str = "HYBRID";
+    Logger::instance().info("Policy: " + pol_str);
+    
     Logger::instance().info("Max entries: " + std::to_string(cfg_.max_entries) +
                             " | Max size: " + StatsDisplay::format_bytes(cfg_.max_bytes));
 
@@ -84,37 +91,28 @@ void ProxyServer::start() {
             std::this_thread::sleep_for(std::chrono::seconds(30));
             lru_cache_.evict_expired();
             lfu_cache_.evict_expired();
+            hybrid_cache_.evict_expired();
             Logger::instance().debug("TTL cleanup pass done");
         }
     }).detach();
 
-    // periodic stats thread
-    // std::thread([this]() {
-    //     while (running_) {
-    //         std::this_thread::sleep_for(std::chrono::seconds(60));
-    //         size_t entries = (cfg_.policy == EvictionPolicy::LRU)
-    //                          ? lru_cache_.size() : lfu_cache_.size();
-    //         size_t bytes   = (cfg_.policy == EvictionPolicy::LRU)
-    //                          ? lru_cache_.bytes() : lfu_cache_.bytes();
-    //         StatsDisplay::print_stats(stats_, entries, bytes);
-    //     }
-    // }).detach();
-    
     std::thread([this]() {
     while (running_) {
         std::this_thread::sleep_for(std::chrono::seconds(5));
-        size_t entries = (cfg_.policy == EvictionPolicy::LRU)
-                         ? lru_cache_.size() : lfu_cache_.size();
-        size_t bytes   = (cfg_.policy == EvictionPolicy::LRU)
-                         ? lru_cache_.bytes() : lfu_cache_.bytes();
-        StatsDisplay::print_stats(stats_, entries, bytes);
+        
+        size_t entries = 0, bytes = 0;
+        std::string pol;
+        
+        if (cfg_.policy == EvictionPolicy::LRU) {
+            entries = lru_cache_.size(); bytes = lru_cache_.bytes(); pol = "LRU";
+        } else if (cfg_.policy == EvictionPolicy::LFU) {
+            entries = lfu_cache_.size(); bytes = lfu_cache_.bytes(); pol = "LFU";
+        } else {
+            entries = hybrid_cache_.size(); bytes = hybrid_cache_.bytes(); pol = "HYBRID";
+        }
 
-        // ADD THESE LINES — write stats.json for dashboard:
-        std::string pol = (cfg_.policy == EvictionPolicy::LRU) ? "LRU" : "LFU";
-        StatsWriter::instance().write(
-            stats_, entries, bytes,
-            cfg_.max_entries, cfg_.max_bytes, pol
-        );
+        StatsDisplay::print_stats(stats_, entries, bytes);
+        StatsWriter::instance().write(stats_, entries, bytes, cfg_.max_entries, cfg_.max_bytes, pol);
     }
     }).detach();
 
@@ -315,12 +313,14 @@ bool ProxyServer::is_blacklisted(const std::string& host) {
 // ══════════════════════════════════════════════
 
 bool ProxyServer::cache_get(const std::string& url, std::string& out) {
+    if (cfg_.policy == EvictionPolicy::HYBRID) return hybrid_cache_.get(url, out);
     if (cfg_.policy == EvictionPolicy::LRU) return lru_cache_.get(url, out);
     return lfu_cache_.get(url, out);
 }
 
 void ProxyServer::cache_put(const std::string& url, const std::string& resp, int ttl) {
-    if (cfg_.policy == EvictionPolicy::LRU) lru_cache_.put(url, resp, ttl);
+    if (cfg_.policy == EvictionPolicy::HYBRID) hybrid_cache_.put(url, resp, ttl);
+    else if (cfg_.policy == EvictionPolicy::LRU) lru_cache_.put(url, resp, ttl);
     else lfu_cache_.put(url, resp, ttl);
 }
 
@@ -402,19 +402,11 @@ void ProxyServer::log(const std::string& msg) const {
     Logger::instance().info(msg);
 }
 
-// void ProxyServer::log_request(const HttpRequest& req, bool hit, size_t bytes) const {
-//     std::string status = hit ? "[HIT] " : "[MISS]";
-//     std::string msg    = status + " " + req.method + " " + req.url +
-//                          " — " + StatsDisplay::format_bytes(bytes);
-//     Logger::instance().info(msg);
-// }
-
 void ProxyServer::log_request(const HttpRequest& req, bool hit, size_t bytes) const {
     std::string status = hit ? "[HIT] " : "[MISS]";
     std::string msg    = status + " " + req.method + " " + req.url +
                          " — " + StatsDisplay::format_bytes(bytes);
     Logger::instance().info(msg);
 
-    // ADD THIS LINE:
     StatsWriter::instance().log_request(req.url, hit, bytes);
 }

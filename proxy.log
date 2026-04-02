@@ -1,91 +1,55 @@
-[2026-03-11 19:10:48] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:10:48] [ INFO] Policy: LRU
-[2026-03-11 19:10:48] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:12:27] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:12:27] [ INFO] Policy: LRU
-[2026-03-11 19:12:27] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:14:18] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:14:18] [ INFO] Policy: LRU
-[2026-03-11 19:14:18] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:14:48] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:15:18] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:15:48] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:16:12] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-11 19:16:18] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:16:48] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:17:18] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:17:22] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-11 19:17:36] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-11 19:17:48] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:19:50] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:19:50] [ INFO] Policy: LRU
-[2026-03-11 19:19:50] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:22:28] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:22:28] [ INFO] Policy: LRU
-[2026-03-11 19:22:28] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:22:58] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:24:03] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:24:03] [ INFO] Policy: LRU
-[2026-03-11 19:24:03] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:24:33] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:24:59] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-11 19:25:03] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:25:11] [ INFO] [MISS] GET http://example.com/ — 797 B
-[2026-03-11 19:25:18] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-11 19:25:33] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:25:58] [ERROR] Cannot connect to localhost:8080
-[2026-03-11 19:25:58] [ERROR] Cannot connect to localhost:8080
-[2026-03-11 19:26:03] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:26:04] [ERROR] Cannot connect to neverssl.com
-[2026-03-11 19:27:53] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:27:53] [ INFO] Policy: LRU
-[2026-03-11 19:27:53] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:28:18] [ INFO] [MISS] GET http://en.wikipedia.org/wiki/Computer_network — 193 B
-[2026-03-11 19:28:23] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:28:26] [ INFO] [MISS] GET http://en.wikipedia.org/wiki/Computer_network — 193 B
-[2026-03-11 19:28:45] [ INFO] [MISS] GET http://python.org/ — 380 B
-[2026-03-11 19:28:53] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:28:54] [ INFO] [MISS] GET http://python.org/ — 380 B
-[2026-03-11 19:29:14] [ INFO] [MISS] GET http://httpbin.org/get — 458 B
-[2026-03-11 19:29:23] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:29:26] [ INFO] [HIT]  GET http://httpbin.org/get — 458 B
-[2026-03-11 19:29:39] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
-[2026-03-11 19:29:49] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-03-11 19:29:53] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:30:23] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:30:53] [DEBUG] TTL cleanup pass done
-[2026-03-11 19:33:11] [ INFO] Proxy listening on port 8080
-[2026-03-11 19:33:11] [ INFO] Policy: LRU
-[2026-03-11 19:33:11] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-11 19:33:27] [ INFO] [MISS] GET http://en.wikipedia.org/wiki/Computer_network — 193 B
-[2026-03-11 19:33:35] [ INFO] [MISS] GET http://en.wikipedia.org/wiki/Computer_network — 193 B
-[2026-03-11 19:33:49] [ INFO] [MISS] GET http://httpbin.org/get — 458 B
-[2026-03-11 19:34:05] [ INFO] [HIT]  GET http://httpbin.org/get — 458 B
-[2026-03-11 19:34:21] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
-[2026-03-11 19:34:27] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:10:53] [ INFO] Proxy listening on port 8080
-[2026-03-12 17:10:53] [ INFO] Policy: LRU
-[2026-03-12 17:10:53] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-12 17:11:23] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:11:33] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:11:40] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:11:50] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:11:53] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:11:53] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:12:23] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:12:53] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:13:23] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:15:17] [ INFO] Proxy listening on port 8080
-[2026-03-12 17:15:17] [ INFO] Policy: LRU
-[2026-03-12 17:15:17] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-03-12 17:15:44] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:15:47] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:15:47] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:15:54] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:15:56] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:16:17] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:16:38] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-03-12 17:16:47] [DEBUG] TTL cleanup pass done
-[2026-03-12 17:16:48] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:16:59] [ INFO] [MISS] GET http://youtube.com/ — 373 B
-[2026-03-12 17:17:17] [DEBUG] TTL cleanup pass done
+[2026-04-03 00:57:42] [ INFO] Proxy listening on port 8080
+[2026-04-03 00:57:42] [ INFO] Policy: HYBRID
+[2026-04-03 00:57:42] [ INFO] Max entries: 500 | Max size: 50.00 MB
+[2026-04-03 00:57:51] [ INFO] [MISS] GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:12] [DEBUG] TTL cleanup pass done
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
+[2026-04-03 00:58:42] [DEBUG] TTL cleanup pass done
+[2026-04-03 00:58:51] [ INFO] [MISS] GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
+[2026-04-03 00:58:52] [ INFO] [MISS] GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
+[2026-04-03 00:58:53] [ INFO] [MISS] GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
+[2026-04-03 00:58:54] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
+[2026-04-03 00:59:12] [DEBUG] TTL cleanup pass done
+[2026-04-03 00:59:42] [DEBUG] TTL cleanup pass done
+[2026-04-03 01:00:09] [ERROR] Cannot connect to neverssl.com
