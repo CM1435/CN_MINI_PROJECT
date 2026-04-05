@@ -1,0 +1,66 @@
+
+****************************************************
+*       HTTP Proxy Cache Server  --  C++           *
+*       LRU / LFU  |  Multi-Threaded               *
+****************************************************
+
+[2026-04-05 11:22:14] [ INFO] Proxy listening on port 8080
+[2026-04-05 11:22:14] [ INFO] Policy: LFU
+[2026-04-05 11:22:14] [ INFO] Max entries: 4 | Max size: 50.00 MB
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot1 — 796 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot2 — 786 B
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot3 — 796 B
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot4 — 796 B
+
++---------------------- CACHE STATS ----------------------+
+|  Hits:                      14                          |
+|  Misses:                     9                          |
+|  Hit Ratio:              60.9%                         |
+|  Evictions:                  4                          |
+|  Bandwidth Saved:      10.9 KB                  |
+|  Active Conns:               1                       |
+|  Cache Entries:              4                          |
+|  Cache Size:            3.1 KB                     |
++---------------------------------------------------------+
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+
++---------------------- CACHE STATS ----------------------+
+|  Hits:                      16                          |
+|  Misses:                    14                          |
+|  Hit Ratio:              53.3%                         |
+|  Evictions:                 10                          |
+|  Bandwidth Saved:      12.4 KB                  |
+|  Active Conns:               0                       |
+|  Cache Entries:              4                          |
+|  Cache Size:            3.1 KB                     |
++---------------------------------------------------------+
+
++---------------------- CACHE STATS ----------------------+
+|  Hits:                      16                          |
+|  Misses:                    14                          |
+|  Hit

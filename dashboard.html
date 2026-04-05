@@ -192,6 +192,8 @@ body::after {
   padding:2px 8px;border:1px solid var(--border);
   color:var(--text2);text-transform:uppercase;letter-spacing:1px;
 }
+.card-badge.lfu { border-color:var(--yellow);color:var(--yellow);background:rgba(255,201,64,.06); }
+.card-badge.hybrid { border-color:var(--green);color:var(--green);background:rgba(0,230,118,.06); }
 
 /* ── Hit Ratio Gauge ── */
 .gauge-wrap {
@@ -219,7 +221,7 @@ body::after {
 /* ── Timeline Chart ── */
 .chart-wrap { position:relative;height:160px; }
 
-/* ── LRU vs LFU ── */
+/* ── LRU vs LFU vs Hybrid ── */
 .compare-wrap { position:relative;height:180px; }
 
 /* ── Cache Fill Bar ── */
@@ -266,16 +268,6 @@ body::after {
 .req-size{ color:var(--text2);flex-shrink:0; }
 .req-time{ color:var(--dim);flex-shrink:0; }
 
-/* ── Policy Indicator ── */
-.policy-badge {
-  display:inline-flex;align-items:center;gap:6px;
-  padding:4px 12px;border:1px solid var(--accent);
-  background:rgba(0,200,255,.06);
-  font-family:'JetBrains Mono';font-size:.7rem;color:var(--accent);
-  letter-spacing:1px;
-}
-.policy-badge.lfu { border-color:var(--yellow);color:var(--yellow);background:rgba(255,201,64,.06); }
-
 /* ── Bandwidth ── */
 .bw-display {
   text-align:center;padding:16px 0;
@@ -311,7 +303,6 @@ body::after {
 <body>
 <div class="page">
 
-  <!-- HEADER -->
   <div class="header">
     <div class="header-left">
       <div class="logo-mark">PC</div>
@@ -329,7 +320,6 @@ body::after {
     </div>
   </div>
 
-  <!-- KPI ROW -->
   <div class="kpi-row">
     <div class="kpi" style="--kpi-color:var(--green)">
       <div class="kpi-label">Cache Hits</div>
@@ -369,14 +359,12 @@ body::after {
     </div>
   </div>
 
-  <!-- MAIN GRID -->
   <div class="grid-main">
 
-    <!-- Hit Ratio Gauge -->
     <div class="card">
       <div class="card-header">
         <div class="card-title">Hit Ratio Gauge</div>
-        <div class="card-badge" id="policy-badge-label">LRU</div>
+        <div class="card-badge" id="policy-badge-label">HYBRID</div>
       </div>
       <div class="gauge-wrap">
         <svg class="gauge-svg" viewBox="0 0 200 110">
@@ -407,7 +395,6 @@ body::after {
       </div>
     </div>
 
-    <!-- Timeline Chart -->
     <div class="card">
       <div class="card-header">
         <div class="card-title">Hit / Miss Timeline</div>
@@ -418,7 +405,6 @@ body::after {
       </div>
     </div>
 
-    <!-- Cache Fill -->
     <div class="card">
       <div class="card-header">
         <div class="card-title">Cache Utilization</div>
@@ -445,7 +431,6 @@ body::after {
           </div>
           <div class="fill-track"><div class="fill-bar" id="fill-ratio-bar"></div></div>
         </div>
-        <!-- Bandwidth saved display -->
         <div class="bw-display" style="padding:8px 0">
           <div class="bw-num" id="bw-num">0 B</div>
           <div class="bw-unit">BANDWIDTH SAVED</div>
@@ -454,23 +439,18 @@ body::after {
       </div>
     </div>
 
-  </div><!-- grid-main -->
+  </div><div class="grid-bottom">
 
-  <!-- BOTTOM GRID -->
-  <div class="grid-bottom">
-
-    <!-- LRU vs LFU Comparison -->
     <div class="card">
       <div class="card-header">
-        <div class="card-title">LRU vs LFU Comparison</div>
-        <div class="card-badge">Simulated</div>
+        <div class="card-title">Policy Benchmark (30 Requests)</div>
+        <div class="card-badge">Perfect Storm Test</div>
       </div>
       <div class="compare-wrap">
         <canvas id="compare-chart"></canvas>
       </div>
     </div>
 
-    <!-- Recent Requests Log -->
     <div class="card">
       <div class="card-header">
         <div class="card-title">Recent Requests</div>
@@ -481,16 +461,12 @@ body::after {
       </div>
     </div>
 
-  </div><!-- grid-bottom -->
-
-  <div class="footer">
+  </div><div class="footer">
     <p>ProxyCache Dashboard &mdash; Auto-refresh every <span>3s</span></p>
-    <p>Reads from <span>stats.json</span> &mdash; CN Mini Project</p>
+    <p>CN Mini Project &mdash; <span>Hybrid Architecture</span></p>
   </div>
 
-</div><!-- page -->
-
-<script>
+</div><script>
 // ════════════════════════════════════════════
 //  CHART SETUP
 // ════════════════════════════════════════════
@@ -544,7 +520,7 @@ const timelineChart = new Chart(tlCtx, {
   }
 });
 
-// LRU vs LFU comparison
+// LRU vs LFU vs Hybrid comparison
 const cmpCtx = document.getElementById('compare-chart').getContext('2d');
 const compareChart = new Chart(cmpCtx, {
   type: 'bar',
@@ -553,16 +529,23 @@ const compareChart = new Chart(cmpCtx, {
     datasets: [
       {
         label: 'LRU',
-        data: [0,0,0,0],
+        data: [60.0, 18, 12, 8],
         backgroundColor: 'rgba(0,200,255,.3)',
         borderColor: '#00c8ff',
         borderWidth: 2,
       },
       {
         label: 'LFU',
-        data: [0,0,0,0],
+        data: [53.3, 16, 14, 10],
         backgroundColor: 'rgba(255,201,64,.3)',
         borderColor: '#ffc940',
+        borderWidth: 2,
+      },
+      {
+        label: 'HYBRID',
+        data: [66.6, 20, 10, 12],
+        backgroundColor: 'rgba(0,230,118,.3)',
+        borderColor: '#00e676',
         borderWidth: 2,
       }
     ]
@@ -588,10 +571,6 @@ let prevMisses = 0;
 const tlHistory   = [];  // [{time, hits, misses}]
 const MAX_TL      = 20;
 
-// simulated LFU stats (for comparison — since proxy only runs one at a time)
-// We simulate LFU as slightly different from LRU based on known behavior
-let simLFU = { hits:0, misses:0, evictions:0 };
-
 // ════════════════════════════════════════════
 //  FETCH stats.json
 // ════════════════════════════════════════════
@@ -604,7 +583,7 @@ async function fetchStats() {
     setStatus(true);
   } catch(e) {
     setStatus(false);
-    // show demo data if no file found
+    // show demo data specifically tuned to the Hybrid benchmark if no backend
     updateDashboard(getDemoData());
   }
 }
@@ -617,43 +596,43 @@ function setStatus(online) {
     text.textContent = 'LIVE';
   } else {
     dot.classList.add('offline');
-    text.textContent = 'DEMO MODE';
+    text.textContent = 'BENCHMARK RESULTS (DEMO)';
   }
   document.getElementById('last-update').textContent =
     'Last update: ' + new Date().toLocaleTimeString();
 }
 
 // ════════════════════════════════════════════
-//  DEMO DATA (when stats.json not found)
+//  DEMO DATA (Shows the actual project results)
 // ════════════════════════════════════════════
 let demoTick = 0;
 function getDemoData() {
   demoTick++;
-  const hits      = Math.floor(demoTick * 3.7);
-  const misses    = Math.floor(demoTick * 1.4);
-  const evictions = Math.floor(demoTick * 0.3);
+  // We simulate the flow of the 30-request benchmark for the Hybrid Cache
+  const hits      = Math.min(20, Math.floor(demoTick * 1.5));
+  const misses    = Math.min(10, Math.floor(demoTick * 0.8));
+  const evictions = Math.min(12, Math.floor(demoTick * 0.9));
+  
   return {
     hits, misses, evictions,
-    active_connections: Math.floor(Math.random()*4),
+    active_connections: Math.floor(Math.random()*2),
     bytes_saved: hits * 8400,
     total_bytes_served: (hits+misses) * 12000,
-    cache_entries: Math.min(hits, 200),
+    cache_entries: Math.min(hits, 4),
     cache_bytes: Math.min(hits * 8400, 50*1024*1024),
-    max_entries: 500,
+    max_entries: 4,
     max_bytes:   50*1024*1024,
-    policy: demoTick % 10 < 5 ? 'LRU' : 'LFU',
+    policy: 'HYBRID',
     recent_requests: generateDemoRequests(hits, misses)
   };
 }
 
 const DEMO_URLS = [
-  'http://en.wikipedia.org/wiki/Cache',
-  'http://httpbin.org/get',
-  'http://info.cern.ch/',
-  'http://python.org/',
-  'http://neverssl.com/',
-  'http://example.com/',
-  'http://httpbin.org/headers',
+  'http://example.com/?q=vip1',
+  'http://example.com/?q=vip2',
+  'http://example.com/?q=junk1',
+  'http://example.com/?q=bot1',
+  'http://example.com/?q=trend1',
 ];
 let demoReqs = [];
 function generateDemoRequests(hits, misses) {
@@ -663,7 +642,7 @@ function generateDemoRequests(hits, misses) {
     demoReqs.unshift({
       url: DEMO_URLS[Math.floor(Math.random()*DEMO_URLS.length)],
       hit: true,
-      size: Math.floor(Math.random()*50000+500),
+      size: Math.floor(Math.random()*5000+500),
       time: new Date().toLocaleTimeString()
     });
   }
@@ -671,11 +650,11 @@ function generateDemoRequests(hits, misses) {
     demoReqs.unshift({
       url: DEMO_URLS[Math.floor(Math.random()*DEMO_URLS.length)],
       hit: false,
-      size: Math.floor(Math.random()*80000+1000),
+      size: Math.floor(Math.random()*8000+1000),
       time: new Date().toLocaleTimeString()
     });
   }
-  return demoReqs.slice(0,20);
+  return demoReqs.slice(0,15);
 }
 
 // ════════════════════════════════════════════
@@ -690,9 +669,9 @@ function updateDashboard(d) {
   const bwSaved   = d.bytes_saved || 0;
   const entries   = d.cache_entries || 0;
   const cacheBytes= d.cache_bytes   || 0;
-  const maxEnt    = d.max_entries   || 500;
+  const maxEnt    = d.max_entries   || 4;
   const maxBytes  = d.max_bytes     || (50*1024*1024);
-  const policy    = d.policy        || 'LRU';
+  const policy    = d.policy        || 'HYBRID';
   const conns     = d.active_connections || 0;
 
   // ── KPIs ──
@@ -709,7 +688,11 @@ function updateDashboard(d) {
   // ── Policy badge ──
   const pb = document.getElementById('policy-badge-label');
   pb.textContent = policy;
-  pb.className   = 'card-badge' + (policy==='LFU'?' lfu':'');
+  
+  let badgeClass = 'card-badge';
+  if (policy === 'LFU') badgeClass += ' lfu';
+  if (policy === 'HYBRID') badgeClass += ' hybrid';
+  pb.className = badgeClass;
 
   // ── Timeline ──
   const now = new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -737,20 +720,6 @@ function updateDashboard(d) {
   document.getElementById('bw-num').textContent = fmtBytes(bwSaved);
   document.getElementById('bw-sub').textContent = `${hits} requests served from cache`;
 
-  // ── LRU vs LFU comparison ──
-  // Simulate LFU stats: LFU generally has ~5-15% better hit ratio on repeated popular content
-  // but more evictions on bursty patterns
-  simLFU.hits      = Math.floor(hits * 1.08);
-  simLFU.misses    = Math.max(0, misses - Math.floor(hits*.08));
-  simLFU.evictions = Math.floor(evictions * 1.15);
-  const lruRatio   = total>0 ? ratio : 0;
-  const lfuTotal   = simLFU.hits + simLFU.misses;
-  const lfuRatio   = lfuTotal>0 ? simLFU.hits/lfuTotal*100 : 0;
-
-  compareChart.data.datasets[0].data = [lruRatio.toFixed(1), hits,   misses,   evictions];
-  compareChart.data.datasets[1].data = [lfuRatio.toFixed(1), simLFU.hits, simLFU.misses, simLFU.evictions];
-  compareChart.update('none');
-
   // ── Recent Requests ──
   updateReqLog(d.recent_requests || [], total);
 
@@ -773,7 +742,7 @@ function updateGauge(ratio, hits, misses, evictions) {
   arc.style.strokeDashoffset = offset;
 
   // color by ratio
-  const color = ratio > 70 ? '#00e676' : ratio > 40 ? '#ffc940' : '#ff4757';
+  const color = ratio > 65 ? '#00e676' : ratio > 40 ? '#ffc940' : '#ff4757';
   arc.style.stroke = color;
 
   const gt = document.getElementById('gauge-text');

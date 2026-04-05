@@ -7,14 +7,32 @@
 // ─────────────────────────────────────────────
 //  ProxyConfig — runtime configuration
 // ─────────────────────────────────────────────
+// struct ProxyConfig {
+//     int           port           = 8080;
+//     // size_t        max_entries    = 500;
+//     size_t        max_entries    = 3;
+//     size_t        max_bytes      = 50 * 1024 * 1024;  // 50 MB
+//     int           default_ttl    = 300;               // seconds
+//     EvictionPolicy policy        = EvictionPolicy::LRU;
+//     bool          verbose        = false;
+//     std::set<std::string> blacklist;                  // blocked domains
+// };
+
+
 struct ProxyConfig {
     int           port           = 8080;
-    size_t        max_entries    = 500;
-    size_t        max_bytes      = 50 * 1024 * 1024;  // 50 MB
-    int           default_ttl    = 300;               // seconds
+    size_t        max_entries    = 4;        // <--- Set to 4 for the final test
+    size_t        max_bytes      = 50 * 1024 * 1024;
+    int           default_ttl    = 300;
+    
+    // --- THE NEW PRO FEATURES ---
+    int           hybrid_threshold = 3;      // <--- Added back!
+    double        hybrid_split    = 0.5;     // <--- Added back!
+    // ----------------------------
+
     EvictionPolicy policy        = EvictionPolicy::LRU;
     bool          verbose        = false;
-    std::set<std::string> blacklist;                  // blocked domains
+    std::set<std::string> blacklist;
 };
 
 // ─────────────────────────────────────────────

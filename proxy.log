@@ -1,55 +1,99 @@
-[2026-04-03 00:57:42] [ INFO] Proxy listening on port 8080
-[2026-04-03 00:57:42] [ INFO] Policy: HYBRID
-[2026-04-03 00:57:42] [ INFO] Max entries: 500 | Max size: 50.00 MB
-[2026-04-03 00:57:51] [ INFO] [MISS] GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:12] [DEBUG] TTL cleanup pass done
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:20] [ INFO] [HIT]  GET http://httpbin.org/html — 3.9 KB
-[2026-04-03 00:58:42] [DEBUG] TTL cleanup pass done
-[2026-04-03 00:58:51] [ INFO] [MISS] GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:51] [ INFO] [HIT]  GET http://example.com/ — 797 B
-[2026-04-03 00:58:52] [ INFO] [MISS] GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:52] [ INFO] [HIT]  GET http://httpbin.org/get — 460 B
-[2026-04-03 00:58:53] [ INFO] [MISS] GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:53] [ INFO] [HIT]  GET http://httpbin.org/headers — 379 B
-[2026-04-03 00:58:54] [ INFO] [MISS] GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:58:54] [ INFO] [HIT]  GET http://info.cern.ch/ — 878 B
-[2026-04-03 00:59:12] [DEBUG] TTL cleanup pass done
-[2026-04-03 00:59:42] [DEBUG] TTL cleanup pass done
-[2026-04-03 01:00:09] [ERROR] Cannot connect to neverssl.com
+[2026-04-05 11:21:57] [ INFO] Proxy listening on port 8080
+[2026-04-05 11:21:57] [ INFO] Policy: LRU
+[2026-04-05 11:21:57] [ INFO] Max entries: 4 | Max size: 50.00 MB
+[2026-04-05 11:21:58] [ INFO] [MISS] GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:21:58] [ INFO] [MISS] GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:21:58] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:21:58] [ INFO] [MISS] GET http://example.com/?q=junk1 — 796 B
+[2026-04-05 11:21:59] [ INFO] [MISS] GET http://example.com/?q=junk2 — 786 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 796 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 786 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 796 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 786 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 796 B
+[2026-04-05 11:21:59] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 786 B
+[2026-04-05 11:21:59] [ INFO] [MISS] GET http://example.com/?q=bot1 — 786 B
+[2026-04-05 11:22:00] [ INFO] [MISS] GET http://example.com/?q=bot2 — 796 B
+[2026-04-05 11:22:00] [ INFO] [MISS] GET http://example.com/?q=bot3 — 786 B
+[2026-04-05 11:22:01] [ INFO] [MISS] GET http://example.com/?q=bot4 — 786 B
+[2026-04-05 11:22:01] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:01] [ INFO] [MISS] GET http://example.com/?q=trend2 — 796 B
+[2026-04-05 11:22:01] [ INFO] [HIT]  GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:01] [ INFO] [HIT]  GET http://example.com/?q=trend2 — 796 B
+[2026-04-05 11:22:02] [ INFO] [MISS] GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:02] [ INFO] [MISS] GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:02] [ INFO] [HIT]  GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:02] [ INFO] [HIT]  GET http://example.com/?q=trend2 — 796 B
+[2026-04-05 11:22:14] [ INFO] Proxy listening on port 8080
+[2026-04-05 11:22:14] [ INFO] Policy: LFU
+[2026-04-05 11:22:14] [ INFO] Max entries: 4 | Max size: 50.00 MB
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot1 — 796 B
+[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot2 — 786 B
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot3 — 796 B
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot4 — 796 B
+[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-04-05 11:22:33] [ INFO] Proxy listening on port 8080
+[2026-04-05 11:22:33] [ INFO] Policy: HYBRID
+[2026-04-05 11:22:33] [ INFO] Max entries: 4 | Max size: 50.00 MB
+[2026-04-05 11:22:36] [ INFO] [MISS] GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:36] [ INFO] [MISS] GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
+[2026-04-05 11:22:36] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:37] [ INFO] [MISS] GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:37] [ INFO] [MISS] GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
+[2026-04-05 11:22:37] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
+[2026-04-05 11:22:38] [ INFO] [MISS] GET http://example.com/?q=bot1 — 796 B
+[2026-04-05 11:22:38] [ INFO] [MISS] GET http://example.com/?q=bot2 — 796 B
+[2026-04-05 11:22:39] [ INFO] [MISS] GET http://example.com/?q=bot3 — 796 B
+[2026-04-05 11:22:39] [ INFO] [MISS] GET http://example.com/?q=bot4 — 786 B
+[2026-04-05 11:22:40] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:41] [ INFO] [MISS] GET http://example.com/?q=trend2 — 796 B
+[2026-04-05 11:22:41] [ INFO] [HIT]  GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:41] [ INFO] [HIT]  GET http://example.com/?q=trend2 — 796 B
+[2026-04-05 11:22:42] [ INFO] [MISS] GET http://example.com/?q=vip1 — 786 B
+[2026-04-05 11:22:42] [ INFO] [MISS] GET http://example.com/?q=vip2 — 786 B
+[2026-04-05 11:22:42] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
+[2026-04-05 11:22:44] [ INFO] [MISS] GET http://example.com/?q=trend2 — 796 B
