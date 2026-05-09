@@ -7,9 +7,9 @@
 #include <vector>
 #include <iostream>
 
-// ─────────────────────────────────────────────
+
 //  CacheEntry — one cached HTTP response
-// ─────────────────────────────────────────────
+
 struct CacheEntry {
     std::string url;
     std::string response;       // raw HTTP response bytes
@@ -33,9 +33,8 @@ struct CacheEntry {
     }
 };
 
-// ─────────────────────────────────────────────
+
 //  CacheStats — runtime statistics
-// ─────────────────────────────────────────────
 struct CacheStats {
     long long hits        = 0;
     long long misses      = 0;
@@ -50,14 +49,10 @@ struct CacheStats {
     }
 };
 
-// ─────────────────────────────────────────────
 //  Eviction Policy enum
-// ─────────────────────────────────────────────
 enum class EvictionPolicy { LRU, LFU, HYBRID };
 
-// ─────────────────────────────────────────────
 //  LRUCache
-// ─────────────────────────────────────────────
 class LRUCache {
 public:
     explicit LRUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
@@ -87,9 +82,7 @@ private:
     void evict_one();
 };
 
-// ─────────────────────────────────────────────
 //  LFUCache
-// ─────────────────────────────────────────────
 class LFUCache {
 public:
     explicit LFUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
@@ -125,9 +118,7 @@ private:
     void evict_one();
 };
 
-// ─────────────────────────────────────────────
 //  HybridCache (IEEE Paper Implementation)
-// ─────────────────────────────────────────────
 class HybridCache {
 public:
     HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats, int threshold = 5);
@@ -145,7 +136,6 @@ private:
     int threshold_T_;
     CacheStats& stats_;
 
-    // The paper specifies splitting the cache into LRU (Size P) and LFU (Size Q)
     LRUCache lru_tier_;
     LFUCache lfu_tier_;
 

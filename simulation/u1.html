@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Cache Memory Simulator</title>
+    <style>
+        :root {
+            --bg: #1e1e2e; --panel: #282a36; --text: #f8f8f2;
+            --primary: #bd93f9; --hit: #50fa7b; --miss: #ff5555;
+            --map-bg: #44475a; --node-bg: #6272a4;
+        }
+
+        body {
+            font-family: 'Consolas', 'Courier New', monospace;
+            background-color: var(--bg); color: var(--text);
+            margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center;
+        }
+
+        h1 { color: var(--primary); margin-bottom: 10px; }
+
+        .toolbar {
+            background: var(--panel); padding: 15px; border-radius: 8px;
+            display: flex; gap: 15px; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 1200px;
+        }
+
+        button, select, input {
+            padding: 8px 12px; font-weight: bold; border-radius: 5px; border: none; cursor: pointer; font-family: inherit;
+        }
+        
+        .btn-page { background: #f1fa8c; color: #000; transition: transform 0.1s; }
+        .btn-page:active { transform: scale(0.95); }
+
+        /* The X-Ray Dashboard Layout */
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            gap: 20px; width: 100%; max-width: 1200px; margin-top: 20px;
+        }
+
+        .panel {
+            background: var(--panel); padding: 15px; border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+
+        h3 { margin-top: 0; color: #8be9fd; font-size: 16px; border-bottom: 1px solid #44475a; padding-bottom: 5px;}
+
+        /* Hash Map Styles */
+        .hash-map-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        .hash-map-table th, .hash-map-table td { padding: 5px; text-align: left; border-bottom: 1px solid #444; }
+        .hash-map-table th { color: var(--primary); }
+        .address { color: #ff79c6; }
+
+        /* Doubly Linked List Styles */
+        .dll-container { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 10px 0; }
+        .dll-node {
+            background: var(--node-bg); padding: 10px; border-radius: 5px; text-align: center;
+            border: 2px solid #50fa7b; position: relative; animation: highlight 0.5s ease;
+        }
+        .dll-node .addr { font-size: 10px; color: #ffb86c; display: block; }
+        .dll-arrow { color: #8be9fd; font-weight: bold; font-size: 18px; }
+        .dll-head-tail { background: #44475a; padding: 10px; border-radius: 5px; font-weight: bold; }
+
+        /* Global Variables Styles */
+        .var-box { background: var(--map-bg); padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 14px; }
+        .var-name { color: #ffb86c; }
+
+        /* Logger */
+        .logger {
+            background: #000; width: 100%; max-width: 1200px; height: 200px; overflow-y: auto;
+            border-radius: 8px; padding: 15px; margin-top: 20px; font-size: 13px; line-height: 1.4;
+        }
+        .log-hit { color: var(--hit); }
+        .log-miss { color: var(--miss); }
+        .log-obj { color: #8be9fd; }
+
+        @keyframes highlight { 0% { background: #ffb86c; transform: scale(1.1); } 100% { background: var(--node-bg); transform: scale(1); } }
+    </style>
+</head>
+<body>
+
+    <h1>🔍 Under-the-Hood Cache X-Ray</h1>
+
+    <div class="toolbar">
+        <label>Policy: 
+            <select id="policySelect" onchange="resetSystem()">
+                <option value="lru">LRU (Doubly Linked List + Map)</option>
+                <option value="lfu">LFU (Freq Buckets + Double Maps)</option>
+                <option value="hybrid">Hybrid (Probation LRU + VIP LFU)</option>
+            </select>
+        </label>
+        <label>Capacity: <input type="number" id="capacityInput" value="3" min="2" max="6" style="width: 50px;" onchange="resetSystem()"></label>
+        <button onclick="resetSystem()" style="background: var(--miss); color: white;">Format Memory (Reset)</button>
+        
+        <div style="border-left: 2px solid #444; margin: 0 10px;"></div>
+        
+        <span style="align-self: center;">Incoming Requests:</span>
+        <button class="btn-page" onclick="requestPage('Page_A')">Page A</button>
+        <button class="btn-page" onclick="requestPage('Page_B')">Page B</button>
+        <button class="btn-page" onclick="requestPage('Page_C')">Page C</button>
+        <button class="btn-page" onclick="requestPage('Page_D')">Page D</button>
+        <button class="btn-page" onclick="requestPage('Page_E')">Page E</button>
+        <button class="btn-page" onclick="requestPage('Page_F')">Page F</button>
+    </div>
+
+    <div class="dashboard">
+        <!-- Panel 1: Hash Maps -->
+        <div class="panel" id="mapPanel">
+            <h3>Hash Map (O(1) Lookups)</h3>
+            <div id="mapContent"></div>
+        </div>
+
+        <!-- Panel 2: Memory / Pointers -->
+        <div class="panel" id="memoryPanel">
+            <h3>Physical Memory (Linked Lists)</h3>
+            <div id="memoryContent"></div>
+        </div>
+
+        <!-- Panel 3: Global Variables & Stats -->
+        <div class="panel" id="statePanel">
+            <h3>System State & Globals</h3>
+            <div id="stateContent"></div>
+        </div>
+    </div>
+
+    <div class="logger" id="logBox"></div>
+
+    <script>
+        // --- System Memory Simulation ---
+        let memoryAddressCounter = 100; // Simulate memory addresses like 0x100
+        
+        // State
+        let policy = 'lru';
+        let capacity = 3;
+        let hits = 0, misses = 0;
+
+        // Data Structures
+        let map = {};           // URL -> Address
+        let dll = [];           // Array representing the Linked List order [Newest ... Oldest]
+        let memoryNodes = {};   // Address -> Object { url, data, freq }
+
+        // LFU Specifics
+        let freqMap = {};       // Freq -> Array of Addresses
+        let minFreq = 0;
+
+        // Hybrid Specifics
+        let globalFreq = {};    // URL -> Total Views
+        let hybridLRU_DLL = []; 
+        let hybridLFU_DLL = []; // Simplifying LFU tier to a sorted array for visualization
+
+        function generateAddress() {
+            memoryAddressCounter++;
+            return `0x0${memoryAddressCounter.toString(16).toUpperCase()}`;
+        }
+
+        function log(msg, type="") {
+            const box = document.getElementById('logBox');
+            box.innerHTML = `<div class="${type}">[SysTime: ${Date.now().toString().slice(-5)}] ${msg}</div>` + box.innerHTML;
+        }
+
+        function resetSystem() {
+            policy = document.getElementById('policySelect').value;
+            capacity = parseInt(document.getElementById('capacityInput').value);
+            hits = 0; misses = 0;
+            map = {}; dll = []; memoryNodes = {};
+            freqMap = {}; minFreq = 0;
+            globalFreq = {}; hybridLRU_DLL = []; hybridLFU_DLL = [];
+            document.getElementById('logBox').innerHTML = '';
+            log(`System formatted. Policy set to ${policy.toUpperCase()} with capacity ${capacity}.`, 'log-obj');
+            updateUI();
+        }
+
+        function requestPage(url) {
+            log(`-----------------------------------`);
+            log(`🌐 HTTP GET Request received for: ${url}`);
+            
+            if (policy === 'lru') runLRU(url);
+            if (policy === 'lfu') runLFU(url);
+            if (policy === 'hybrid') runHybrid(url);
+            
+            updateUI();
+        }
+
+        // ==========================================
+        // 1. LRU Engine
+        // ==========================================
+        function runLRU(url) {
+            log(`🔍 Checking Hash Map for key "${url}"...`);
+            
+            if (map[url]) {
+                const addr = map[url];
+                hits++;
+                log(`✅ Cache Hit! Found at memory address <span class="address">${addr}</span>`, 'log-hit');
+                log(`🔄 std::list::splice() -> Moving Node at ${addr} to HEAD of Linked List.`);
+                
+                // Move in DLL
+                dll = dll.filter(a => a !== addr);
+                dll.unshift(addr); // Add to front
+            } else {
+                misses++;
+                log(`❌ Cache Miss! URL not in Hash Map. Fetching from Origin...`, 'log-miss');
+                
+                // Eviction check
+                if (dll.length >= capacity) {
+                    const oldestAddr = dll.pop(); // Remove from back
+                    const oldestUrl = memoryNodes[oldestAddr].url;
+                    log(`⚠️ Capacity Reached. Evicting Least Recently Used item at TAIL: ${oldestUrl} (${oldestAddr})`);
+                    delete map[oldestUrl];
+                    delete memoryNodes[oldestAddr];
+                }
+
+                // Create new object
+                const newAddr = generateAddress();
+                log(`📦 new CacheEntry("${url}") instantiated at address <span class="address">${newAddr}</span>`, 'log-obj');
+                
+                memoryNodes[newAddr] = { url: url, data: "<html>...</html>" };
+                map[url] = newAddr;
+                dll.unshift(newAddr); // Push front
+                log(`🔗 Pointers updated. Added to Map and HEAD of DLL.`);
+            }
+        }
+
+        // ==========================================
+        // 2. LFU Engine
+        // ==========================================
+        function runLFU(url) {
+            log(`🔍 Checking key_map for key "${url}"...`);
+            
+            if (map[url]) {
+                const addr = map[url];
+                const node = memoryNodes[addr];
+                hits++;
+                log(`✅ Cache Hit! Found at <span class="address">${addr}</span>`, 'log-hit');
+                
+                const oldFreq = node.freq;
+                node.freq++;
+                log(`📈 Incrementing Frequency: ${oldFreq} -> ${node.freq}`);
+                
+                // Remove from old bucket
+                freqMap[oldFreq] = freqMap[oldFreq].filter(a => a !== addr);
+                if (freqMap[oldFreq].length === 0) {
+                    delete freqMap[oldFreq];
+                    if (minFreq === oldFreq) {
+                        minFreq = node.freq;
+                        log(`⚙️ Bucket ${oldFreq} empty. Updating min_freq_ = ${minFreq}`);
+                    }
+                }
+                
+                // Add to new bucket
+                if (!freqMap[node.freq]) freqMap[node.freq] = [];
+                freqMap[node.freq].unshift(addr);
+
+            } else {
+                misses++;
+                log(`❌ Cache Miss! Fetching from Origin...`, 'log-miss');
+                
+                if (Object.keys(map).length >= capacity) {
+                    log(`⚠️ Capacity Full. Looking for lowest frequency bucket: freq_map_[${minFreq}]`);
+                    const bucket = freqMap[minFreq];
+                    const evictAddr = bucket.pop(); // pop from back of lowest bucket
+                    const evictUrl = memoryNodes[evictAddr].url;
+                    
+                    log(`🗑️ Evicting ${evictUrl} from bucket ${minFreq}`);
+                    delete map[evictUrl];
+                    delete memoryNodes[evictAddr];
+                    if (bucket.length === 0) delete freqMap[minFreq];
+                }
+
+                const newAddr = generateAddress();
+                log(`📦 new CacheEntry("${url}") created at <span class="address">${newAddr}</span>`, 'log-obj');
+                
+                memoryNodes[newAddr] = { url: url, freq: 1 };
+                map[url] = newAddr;
+                minFreq = 1;
+                log(`⚙️ Resetting min_freq_ = 1`);
+                
+                if (!freqMap[1]) freqMap[1] = [];
+                freqMap[1].unshift(newAddr);
+            }
+        }
+
+        // ==========================================
+        // 3. Hybrid Engine
+        // ==========================================
+        function runHybrid(url) {
+            const threshold = 3;
+            const lruCap = Math.max(1, Math.floor(capacity / 2));
+            const lfuCap = Math.max(1, Math.ceil(capacity / 2));
+
+            // 1. Update Global Tracker
+            if (!globalFreq[url]) globalFreq[url] = 0;
+            globalFreq[url]++;
+            log(`📊 Updating global_freq_["${url}"] = ${globalFreq[url]}`);
+
+            if (map[url]) {
+                const addr = map[url];
+                hits++;
+                
+                // Is it in LRU or LFU?
+                if (hybridLRU_DLL.includes(addr)) {
+                    log(`✅ Found in Probation (LRU Tier) at <span class="address">${addr}</span>`, 'log-hit');
+                    
+                    if (globalFreq[url] >= threshold) {
+                        log(`🎓 Threshold (${threshold}) reached! Removing from LRU list and promoting to VIP (LFU) Tier!`, 'log-obj');
+                        hybridLRU_DLL = hybridLRU_DLL.filter(a => a !== addr);
+                        
+                        // Insert to LFU
+                        if (hybridLFU_DLL.length >= lfuCap) {
+                            // Find lowest freq in LFU to evict
+                            hybridLFU_DLL.sort((a,b) => globalFreq[memoryNodes[a].url] - globalFreq[memoryNodes[b].url]);
+                            const evictAddr = hybridLFU_DLL.shift();
+                            log(`⚠️ VIP Tier Full. Evicting least popular VIP: ${memoryNodes[evictAddr].url}`);
+                            delete map[memoryNodes[evictAddr].url];
+                            delete memoryNodes[evictAddr];
+                        }
+                        hybridLFU_DLL.push(addr);
+                    } else {
+                        log(`🔄 Moving to HEAD of Probation LRU.`);
+                        hybridLRU_DLL = hybridLRU_DLL.filter(a => a !== addr);
+                        hybridLRU_DLL.unshift(addr);
+                    }
+                } else {
+                    log(`💎 Found in VIP (LFU Tier) at <span class="address">${addr}</span>`, 'log-hit');
+                    log(`🔒 Item is safe in VIP tier. No list movement required.`);
+                }
+            } else {
+                misses++;
+                log(`❌ Miss. Brand new items must start in Probation LRU.`, 'log-miss');
+                
+                if (hybridLRU_DLL.length >= lruCap) {
+                    const oldestAddr = hybridLRU_DLL.pop();
+                    log(`⚠️ Probation Full. Evicting ${memoryNodes[oldestAddr].url} to trash.`);
+                    delete map[memoryNodes[oldestAddr].url];
+                    delete memoryNodes[oldestAddr];
+                }
+
+                const newAddr = generateAddress();
+                memoryNodes[newAddr] = { url: url };
+                map[url] = newAddr;
+                hybridLRU_DLL.unshift(newAddr);
+                log(`📦 Added to Map and HEAD of Probation List at <span class="address">${newAddr}</span>`, 'log-obj');
+            }
+        }
+
+        // ==========================================
+        // UI Rendering 
+        // ==========================================
+        function updateUI() {
+            // 1. Update State Panel
+            let stateHTML = `<div class="var-box">Total Hits: <span style="color:var(--hit)">${hits}</span><br>Total Misses: <span style="color:var(--miss)">${misses}</span></div>`;
+            
+            if (policy === 'lfu') {
+                stateHTML += `<div class="var-box"><span class="var-name">int min_freq_</span> = ${minFreq}</div>`;
+            }
+            if (policy === 'hybrid') {
+                stateHTML += `<div class="var-box"><span class="var-name">int threshold_T_</span> = 3</div>`;
+                stateHTML += `<div class="var-box"><span class="var-name">std::map global_freq_</span><br>`;
+                for (let key in globalFreq) {
+                    stateHTML += `["${key}"] = ${globalFreq[key]}<br>`;
+                }
+                stateHTML += `</div>`;
+            }
+            document.getElementById('stateContent').innerHTML = stateHTML;
+
+            // 2. Update Map Panel
+            let mapHTML = `<table class="hash-map-table"><tr><th>String (Key)</th><th>Iterator (Address)</th></tr>`;
+            for (let key in map) {
+                mapHTML += `<tr><td>"${key}"</td><td class="address">${map[key]}</td></tr>`;
+            }
+            mapHTML += `</table>`;
+            document.getElementById('mapContent').innerHTML = Object.keys(map).length ? mapHTML : '<i>Map is empty.</i>';
+
+            // 3. Update Memory (Linked Lists) Panel
+            let memHTML = '';
+            
+            if (policy === 'lru') {
+                memHTML = buildDLLHtml(dll, "lru_list_");
+            } 
+            else if (policy === 'lfu') {
+                for (let freq in freqMap) {
+                    memHTML += `<div style="margin-bottom:10px; color:#ffb86c">freq_map_[${freq}]</div>`;
+                    memHTML += buildDLLHtml(freqMap[freq], "");
+                }
+                if (Object.keys(freqMap).length === 0) memHTML = "<i>Lists are empty.</i>";
+            }
+            else if (policy === 'hybrid') {
+                memHTML += `<div style="color:#ffb86c">lru_tier_ (Probation)</div>`;
+                memHTML += buildDLLHtml(hybridLRU_DLL, "");
+                memHTML += `<div style="color:#ffb86c; margin-top:15px;">lfu_tier_ (VIP)</div>`;
+                memHTML += buildDLLHtml(hybridLFU_DLL, "");
+            }
+
+            document.getElementById('memoryContent').innerHTML = memHTML;
+        }
+
+        // Helper to draw the [HEAD] <-> [Node] <-> [TAIL]
+        function buildDLLHtml(addressArray, title) {
+            if (addressArray.length === 0) return `<div class="dll-container"><i>Empty List</i></div>`;
+            
+            let html = `<div class="dll-container">`;
+            html += `<div class="dll-head-tail">HEAD</div> <div class="dll-arrow">⇄</div> `;
+            
+            addressArray.forEach((addr, idx) => {
+                const node = memoryNodes[addr];
+                html += `
+                <div class="dll-node">
+                    ${node.url}
+                    <span class="addr">${addr}</span>
+                </div>`;
+                html += ` <div class="dll-arrow">⇄</div> `;
+            });
+            
+            html += `<div class="dll-head-tail">TAIL</div></div>`;
+            return html;
+        }
+
+        // Initial render
+        resetSystem();
+    </script>
+</body>
+</html>

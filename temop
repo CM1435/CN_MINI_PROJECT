@@ -1,0 +1,789 @@
+import { useState, useRef, useCallback, useEffect } from "react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+
+// ══════════════════════════════════════════════════════════
+//  CONFIG — Synced directly from proxy.h  ProxyConfig{}
+// ══════════════════════════════════════════════════════════
+const CFG = {
+  port:             8080,
+  max_entries:      4,                 // <--- Set to 4 for the final test
+  max_bytes:        50 * 1024 * 1024,  // 50 MB
+  default_ttl:      300,               // seconds
+  hybrid_threshold: 3,                 // <--- hybrid_threshold = 3
+  hybrid_split:     0.5,               // <--- hybrid_split = 0.5
+};
+// Derived from HybridCache constructor:  max_entries/2 each
+const H_LRU_CAP = Math.floor(CFG.max_entries * CFG.hybrid_split); // 2
+const H_LFU_CAP = CFG.max_entries - H_LRU_CAP;                    // 2
+
+const label = (url) => {
+  try { const u = new URL(url); return (u.pathname + u.search).replace(/^\//, "").slice(0, 16) || u.hostname.slice(0, 16); }
+  catch { return url.slice(-16); }
+};
+
+// ══════════════════════════════════════════════════════════
+//  LRU Cache  (mirrors LRUCache in cache.cpp)
+//  list front = MRU, list back = LRU
+// ══════════════════════════════════════════════════════════
+class LRU {
+  constructor(cap) {
+    this.cap = cap;
+    this.order = []; // index 0 = MRU (most recent), last = LRU
+    this.store = {}; // url → {size, freq}
+    this.hits = 0; this.misses = 0; this.evictions = 0;
+  }
+  get(url) {
+    if (url in this.store) {
+      this.hits++;
+      this.order = [url, ...this.order.filter(u => u !== url)];
+      return true;
+    }
+    this.misses++;
+    return false;
+  }
+  put(url) {
+    const evicted = [];
+    if (url in this.store) this.order = this.order.filter(u => u !== url);
+    while (this.order.length >= this.cap) {
+      const lru = this.order.pop(); // evict least recently used (back)
+      delete this.store[lru];
+      this.evictions++;
+      evicted.push(lru);
+    }
+    this.store[url] = { size: ((url.length * 137) % 7500) + 500, freq: 1 };
+    this.order.unshift(url); // new item = most recently used
+    return evicted;
+  }
+  remove(url) {
+    if (!(url in this.store)) return false;
+    delete this.store[url];
+    this.order = this.order.filter(u => u !== url);
+    return true;
+  }
+  snapshot() {
+    return this.order.map((url, i) => ({ url, rank: i, label: label(url), ...this.store[url] }));
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  LFU Cache  (mirrors LFUCache in cache.cpp)
+//  keyMap + freqMap, evicts min-freq item
+// ══════════════════════════════════════════════════════════
+class LFU {
+  constructor(cap) {
+    this.cap = cap;
+    this.keyMap = {};  // url → {freq, size}
+    this.freqMap = {}; // freq → [urls] ordered by insertion
+    this.minFreq = 0;
+    this.hits = 0; this.misses = 0; this.evictions = 0;
+  }
+  _up(url) {
+    const n = this.keyMap[url];
+    const old = n.freq;
+    n.freq++;
+    this.freqMap[old] = (this.freqMap[old] || []).filter(u => u !== url);
+    if (!this.freqMap[old].length) {
+      delete this.freqMap[old];
+      if (this.minFreq === old) this.minFreq = n.freq;
+    }
+    if (!this.freqMap[n.freq]) this.freqMap[n.freq] = [];
+    this.freqMap[n.freq].push(url);
+  }
+  get(url) {
+    if (url in this.keyMap) { this.hits++; this._up(url); return true; }
+    this.misses++;
+    return false;
+  }
+  put(url) {
+    const evicted = [];
+    if (url in this.keyMap) { this._up(url); return evicted; }
+    while (Object.keys(this.keyMap).length >= this.cap) {
+      const list = this.freqMap[this.minFreq] || [];
+      const e = list.shift();
+      if (!list.length) delete this.freqMap[this.minFreq];
+      if (e) { delete this.keyMap[e]; this.evictions++; evicted.push(e); }
+    }
+    this.keyMap[url] = { freq: 1, size: ((url.length * 137) % 7500) + 500 };
+    if (!this.freqMap[1]) this.freqMap[1] = [];
+    this.freqMap[1].push(url);
+    this.minFreq = 1;
+    return evicted;
+  }
+  remove(url) {
+    if (!(url in this.keyMap)) return false;
+    const n = this.keyMap[url];
+    this.freqMap[n.freq] = (this.freqMap[n.freq] || []).filter(u => u !== url);
+    if (!(this.freqMap[n.freq] || []).length) delete this.freqMap[n.freq];
+    delete this.keyMap[url];
+    return true;
+  }
+  snapshot() {
+    const entries = [];
+    Object.entries(this.freqMap).sort(([a],[b]) => +b - +a)
+      .forEach(([freq, list]) => list.forEach(url => {
+        if (url in this.keyMap) entries.push({ url, freq: +freq, label: label(url), ...this.keyMap[url] });
+      }));
+    return entries;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  Hybrid Cache  (mirrors HybridCache in cache.cpp)
+//  New items → LRU tier; graduate to LFU when global_freq > threshold_T_
+// ══════════════════════════════════════════════════════════
+class Hybrid {
+  constructor() {
+    this.lruTier = new LRU(H_LRU_CAP);
+    this.lfuTier = new LFU(H_LFU_CAP);
+    this.gFreq = {};   // global_freq_
+    this.T = CFG.hybrid_threshold; // threshold_T_
+    this.hits = 0; this.misses = 0; this.evictions = 0;
+    this.lastEvent = null;
+  }
+  get(url) {
+    this.lastEvent = null;
+    // 1. Check LRU tier
+    if (url in this.lruTier.store) {
+      this.hits++;
+      this.lruTier.order = [url, ...this.lruTier.order.filter(u => u !== url)];
+      this.gFreq[url] = (this.gFreq[url] || 0) + 1;
+      if (this.gFreq[url] > this.T) {
+        // Graduation: lru_tier_.remove → lfu_tier_.put
+        const data = { ...this.lruTier.store[url] };
+        this.lruTier.remove(url);
+        const ev = this.lfuTier.put(url);
+        this.evictions += ev.length;
+        this.lastEvent = { type: "graduate", url };
+        return { hit: true, graduated: true, tier: "LRU→LFU" };
+      }
+      this.lastEvent = { type: "hit", tier: "LRU" };
+      return { hit: true, graduated: false, tier: "LRU" };
+    }
+    // 2. Check LFU tier
+    if (url in this.lfuTier.keyMap) {
+      this.hits++;
+      this.lfuTier._up(url); // increment LFU freq
+      this.gFreq[url] = (this.gFreq[url] || 0) + 1;
+      // reset_ttl equivalent (no-op in sim)
+      this.lastEvent = { type: "hit", tier: "LFU" };
+      return { hit: true, tier: "LFU" };
+    }
+    this.misses++;
+    this.lastEvent = { type: "miss" };
+    return { hit: false };
+  }
+  put(url) {
+    // Paper logic: new items always go into LRU first, frequency starts at 1
+    this.gFreq[url] = 1;
+    const ev = this.lruTier.put(url);
+    this.evictions += ev.length;
+    this.lastEvent = { type: "insert", url, tier: "LRU" };
+  }
+  snapshot() {
+    return {
+      lru: this.lruTier.snapshot(),
+      lfu: this.lfuTier.snapshot(),
+      gFreq: { ...this.gFreq },
+    };
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+//  Workload presets (mirrors compare.sh phases)
+// ══════════════════════════════════════════════════════════
+const URLS = [
+  { key: "vip1",   url: "http://example.com/?q=vip1",   color: "#00e676", phase: "VIP" },
+  { key: "vip2",   url: "http://example.com/?q=vip2",   color: "#00e676", phase: "VIP" },
+  { key: "junk1",  url: "http://example.com/?q=junk1",  color: "#ffc940", phase: "JUNK" },
+  { key: "junk2",  url: "http://example.com/?q=junk2",  color: "#ffc940", phase: "JUNK" },
+  { key: "bot1",   url: "http://example.com/?q=bot1",   color: "#ff6d35", phase: "BOT" },
+  { key: "trend1", url: "http://example.com/?q=trend1", color: "#a78bfa", phase: "TREND" },
+  { key: "trend2", url: "http://example.com/?q=trend2", color: "#a78bfa", phase: "TREND" },
+];
+
+// compare.sh benchmark sequence (30 requests)
+const BENCHMARK_SEQ = [
+  // Phase 1: VIP (5×2 = 10)
+  ...Array(5).fill(null).flatMap(() => ["http://example.com/?q=vip1","http://example.com/?q=vip2"]),
+  // Phase 2: Junk (4×2 = 8)
+  ...Array(4).fill(null).flatMap(() => ["http://example.com/?q=junk1","http://example.com/?q=junk2"]),
+  // Phase 3: Bots (4×1 = 4)
+  "http://example.com/?q=bot1","http://example.com/?q=bot2","http://example.com/?q=bot3","http://example.com/?q=bot4",
+  // Phase 4: Trends (2×2 = 4)
+  ...Array(2).fill(null).flatMap(() => ["http://example.com/?q=trend1","http://example.com/?q=trend2"]),
+  // Phase 5: Final Exam (4)
+  "http://example.com/?q=vip1","http://example.com/?q=vip2","http://example.com/?q=trend1","http://example.com/?q=trend2",
+];
+
+const fmtBytes = b => b >= 1048576 ? (b/1048576).toFixed(1)+"MB" : b >= 1024 ? (b/1024).toFixed(0)+"KB" : b+"B";
+const hitRatio = s => { const t = s.hits + s.misses; return t === 0 ? 0 : +((s.hits/t)*100).toFixed(1); };
+
+// ══════════════════════════════════════════════════════════
+//  Styles
+// ══════════════════════════════════════════════════════════
+const S = {
+  root: {
+    fontFamily: "'JetBrains Mono', 'Courier New', monospace",
+    background: "#03080d",
+    color: "#c0d8f0",
+    minHeight: "100vh",
+    padding: "16px",
+    boxSizing: "border-box",
+  },
+  hdr: { display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:12, marginBottom:16 },
+  title: { margin:0, fontSize:"1.4rem", fontWeight:800, letterSpacing:-0.5, color:"#fff", fontFamily:"'Syne','JetBrains Mono',monospace" },
+  sub: { margin:"4px 0 0", fontSize:".68rem", color:"#4a7090", letterSpacing:2, textTransform:"uppercase" },
+  badges: { display:"flex", flexWrap:"wrap", gap:8 },
+  badge: { padding:"4px 10px", border:"1px solid", fontSize:".62rem", letterSpacing:1, background:"rgba(0,0,0,.4)" },
+  reqPanel: { background:"#070f17", border:"1px solid #0f2035", padding:"12px 16px", marginBottom:12 },
+  reqLabel: { fontSize:".62rem", color:"#4a7090", letterSpacing:2, display:"block", marginBottom:8 },
+  presets: { display:"flex", flexWrap:"wrap", gap:6, marginBottom:10 },
+  urlBtn: {
+    background:"rgba(0,0,0,.5)", border:"1px solid", padding:"5px 10px", cursor:"pointer",
+    fontSize:".68rem", letterSpacing:.5, display:"flex", alignItems:"center", gap:6,
+    transition:"all .15s",
+  },
+  urlKey: { fontWeight:700, fontSize:".72rem" },
+  phaseDot: { width:6, height:6, borderRadius:"50%", flexShrink:0 },
+  benchBtn: {
+    background:"rgba(0,230,118,.08)", border:"1px solid #00e676", color:"#00e676",
+    padding:"6px 14px", cursor:"pointer", fontSize:".7rem", letterSpacing:1,
+    marginRight:8, transition:"all .15s",
+  },
+  resetBtn: {
+    background:"rgba(255,109,53,.08)", border:"1px solid #ff6d35", color:"#ff6d35",
+    padding:"6px 14px", cursor:"pointer", fontSize:".7rem", letterSpacing:1,
+  },
+  customRow: { display:"flex", gap:8, alignItems:"center", marginTop:8 },
+  customInput: {
+    flex:1, background:"#0a1622", border:"1px solid #0f2035", color:"#c0d8f0",
+    padding:"6px 10px", fontSize:".72rem", fontFamily:"'JetBrains Mono',monospace",
+    outline:"none",
+  },
+  sendBtn: {
+    background:"rgba(0,200,255,.08)", border:"1px solid #00c8ff", color:"#00c8ff",
+    padding:"6px 14px", cursor:"pointer", fontSize:".7rem", letterSpacing:1, transition:"all .15s",
+  },
+  ticker: {
+    background:"#050b12", border:"1px solid #0a1a2a", padding:"6px 10px",
+    marginBottom:12, overflow:"hidden", whiteSpace:"nowrap", fontSize:".65rem",
+  },
+  grid: { display:"grid", gridTemplateColumns:"1fr 1fr 1.4fr", gap:12, marginBottom:12 },
+  card: { background:"#070f17", border:"1px solid #0f2035", padding:"14px", position:"relative", overflow:"hidden", transition:"border-color .3s" },
+  cardTop: { width:"100%", height:2, position:"absolute", top:0, left:0 },
+  cardTitle: { fontSize:".65rem", letterSpacing:2, textTransform:"uppercase", marginBottom:4, display:"flex", alignItems:"center", gap:8 },
+  cardDot: { width:3, height:12, flexShrink:0 },
+  capsule: { padding:"2px 8px", border:"1px solid", fontSize:".58rem", letterSpacing:1, marginLeft:"auto" },
+  statsRow: { display:"flex", gap:8, marginTop:10, paddingTop:8, borderTop:"1px solid #0a1a2a" },
+  stat: { flex:1, textAlign:"center" },
+  statVal: { fontWeight:700, fontSize:"1rem" },
+  statLbl: { fontSize:".55rem", color:"#4a7090", letterSpacing:1, textTransform:"uppercase" },
+  entryList: { minHeight:100 },
+  entry: {
+    display:"flex", alignItems:"center", gap:8, padding:"5px 8px", marginBottom:4,
+    border:"1px solid #0a1a2a", background:"rgba(0,0,0,.3)", position:"relative",
+    transition:"background .3s, border-color .3s",
+  },
+  entryRank: {
+    width:18, height:18, display:"flex", alignItems:"center", justifyContent:"center",
+    fontSize:".58rem", fontWeight:700, flexShrink:0, borderRadius:2,
+  },
+  entryUrl: { flex:1, fontSize:".66rem", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  entryFreq: { fontSize:".62rem", flexShrink:0 },
+  entrySize: { fontSize:".6rem", color:"#4a7090", flexShrink:0 },
+  emptySlot: {
+    display:"flex", alignItems:"center", justifyContent:"center",
+    height:30, border:"1px dashed #0f2035", marginBottom:4,
+    fontSize:".6rem", color:"#1a3050", letterSpacing:1,
+  },
+  hybridTiers: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 },
+  tierBox: { border:"1px solid #0a1a2a", padding:8, background:"rgba(0,0,0,.2)" },
+  tierLabel: { fontSize:".58rem", letterSpacing:2, textTransform:"uppercase", marginBottom:6, paddingBottom:4, borderBottom:"1px solid #0a1a2a" },
+  gFreqRow: { display:"flex", flexWrap:"wrap", gap:4, marginTop:8 },
+  gFreqItem: { padding:"2px 6px", border:"1px solid #0a1a2a", fontSize:".6rem", background:"rgba(0,0,0,.3)" },
+  gradNote: {
+    marginTop:6, padding:"4px 8px", background:"rgba(0,230,118,.06)", border:"1px solid rgba(0,230,118,.2)",
+    fontSize:".62rem", color:"#00e676", animation:"pulse 1s ease-in-out",
+  },
+  logCard: { background:"#070f17", border:"1px solid #0f2035", padding:"14px", marginBottom:12 },
+  logTable: { width:"100%", borderCollapse:"collapse", fontSize:".65rem" },
+  chartCard: { background:"#070f17", border:"1px solid #0f2035", padding:"14px" },
+  flashOverlay: {
+    position:"absolute", inset:0, pointerEvents:"none",
+    transition:"opacity .4s",
+  },
+  benchNote: { fontSize:".62rem", color:"#4a7090", marginTop:6 },
+};
+
+// ══════════════════════════════════════════════════════════
+//  Sub-components
+// ══════════════════════════════════════════════════════════
+function CacheEntry({ entry, rankColor, showFreq }) {
+  return (
+    <div style={S.entry}>
+      <div style={{ ...S.entryRank, background: rankColor + "22", color: rankColor, border: `1px solid ${rankColor}55` }}>
+        {showFreq ? entry.freq : entry.rank + 1}
+      </div>
+      <span style={{ ...S.entryUrl, color: "#c0d8f0" }}>{entry.label || entry.url}</span>
+      {showFreq && <span style={{ ...S.entryFreq, color: "#ffc940" }}>f:{entry.freq}</span>}
+      <span style={S.entrySize}>{fmtBytes(entry.size || 0)}</span>
+    </div>
+  );
+}
+
+function EmptySlot({ label }) {
+  return <div style={S.emptySlot}>[ {label} ]</div>;
+}
+
+function LRUPanel({ snap, stats, flash, cap }) {
+  const color = "#00c8ff";
+  const rankColors = ["#00e676","#7ef0a8","#ffc940","#ff6d35"];
+  return (
+    <div style={{ ...S.card, borderColor: flash === "hit" ? "#00e676" : flash === "miss" ? "#ff6d35" : "#0f2035" }}>
+      <div style={{ ...S.cardTop, background: color }} />
+      {flash && <div style={{ ...S.flashOverlay, background: flash === "hit" ? "rgba(0,230,118,.06)" : "rgba(255,109,53,.06)", opacity:1 }} />}
+      <div style={S.cardTitle}>
+        <div style={{ ...S.cardDot, background: color }} />
+        <span style={{ color }}>LRU CACHE</span>
+        <span style={{ ...S.capsule, borderColor:"#0f2035", color:"#4a7090" }}>CAP:{cap}</span>
+      </div>
+      <div style={{ fontSize:".58rem", color:"#2a5070", marginBottom:8 }}>Least Recently Used · evicts oldest access</div>
+      <div style={S.entryList}>
+        {Array.from({ length: cap }, (_, i) => {
+          const e = snap[i];
+          return e ? <CacheEntry key={e.url} entry={e} rankColor={rankColors[i] || "#4a7090"} showFreq={false} />
+                   : <EmptySlot key={i} label={i === cap-1 ? "LRU ← evict" : "empty"} />;
+        })}
+      </div>
+      <div style={S.statsRow}>
+        {[["HITS",stats.hits,"#00e676"],["MISSES",stats.misses,"#ff6d35"],["EVICT",stats.evictions,"#ffc940"],["RATIO",hitRatio(stats)+"%","#00c8ff"]].map(([l,v,c])=>(
+          <div key={l} style={S.stat}>
+            <div style={{ ...S.statVal, color:c }}>{v}</div>
+            <div style={S.statLbl}>{l}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LFUPanel({ snap, stats, flash, cap }) {
+  const color = "#ffc940";
+  const freqColor = f => f >= 4 ? "#00e676" : f >= 2 ? "#ffc940" : "#ff6d35";
+  return (
+    <div style={{ ...S.card, borderColor: flash === "hit" ? "#00e676" : flash === "miss" ? "#ff6d35" : "#0f2035" }}>
+      <div style={{ ...S.cardTop, background: color }} />
+      {flash && <div style={{ ...S.flashOverlay, background: flash === "hit" ? "rgba(0,230,118,.06)" : "rgba(255,109,53,.06)", opacity:1 }} />}
+      <div style={S.cardTitle}>
+        <div style={{ ...S.cardDot, background: color }} />
+        <span style={{ color }}>LFU CACHE</span>
+        <span style={{ ...S.capsule, borderColor:"#0f2035", color:"#4a7090" }}>CAP:{cap}</span>
+      </div>
+      <div style={{ fontSize:".58rem", color:"#2a5070", marginBottom:8 }}>Least Frequently Used · evicts lowest freq</div>
+      <div style={S.entryList}>
+        {snap.length === 0
+          ? Array.from({ length: cap }, (_, i) => <EmptySlot key={i} label="empty" />)
+          : snap.map((e, i) => (
+              <div key={e.url} style={{ ...S.entry, borderColor: i === snap.length-1 && snap.length === cap ? "rgba(255,109,53,.3)" : "#0a1a2a" }}>
+                <div style={{ ...S.entryRank, background: freqColor(e.freq)+"22", color: freqColor(e.freq), border:`1px solid ${freqColor(e.freq)}55`, width:24, fontSize:".6rem" }}>
+                  f:{e.freq}
+                </div>
+                <span style={{ ...S.entryUrl, color:"#c0d8f0" }}>{e.label || e.url}</span>
+                {i === snap.length-1 && snap.length === cap && (
+                  <span style={{ fontSize:".55rem", color:"#ff6d35", flexShrink:0 }}>←evict</span>
+                )}
+                <span style={S.entrySize}>{fmtBytes(e.size || 0)}</span>
+              </div>
+            ))
+        }
+        {snap.length < cap && Array.from({ length: cap - snap.length }, (_, i) => <EmptySlot key={`e${i}`} label="empty" />)}
+      </div>
+      <div style={S.statsRow}>
+        {[["HITS",stats.hits,"#00e676"],["MISSES",stats.misses,"#ff6d35"],["EVICT",stats.evictions,"#ffc940"],["RATIO",hitRatio(stats)+"%","#ffc940"]].map(([l,v,c])=>(
+          <div key={l} style={S.stat}>
+            <div style={{ ...S.statVal, color:c }}>{v}</div>
+            <div style={S.statLbl}>{l}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HybridPanel({ snap, stats, flash, lastGrad }) {
+  const color = "#00e676";
+  return (
+    <div style={{ ...S.card, borderColor: flash === "graduate" ? "#00e676" : flash === "hit" ? "#00e676" : flash === "miss" ? "#ff6d35" : "#0f2035" }}>
+      <div style={{ ...S.cardTop, background: `linear-gradient(90deg,${color},#00c8ff)` }} />
+      {flash && <div style={{ ...S.flashOverlay, background: flash === "hit" || flash === "graduate" ? "rgba(0,230,118,.06)" : "rgba(255,109,53,.06)", opacity:1 }} />}
+      <div style={S.cardTitle}>
+        <div style={{ ...S.cardDot, background: color }} />
+        <span style={{ color }}>HYBRID CACHE</span>
+        <span style={{ ...S.capsule, borderColor:"rgba(0,230,118,.3)", color:"#00e676" }}>T:{CFG.hybrid_threshold}</span>
+        <span style={{ ...S.capsule, borderColor:"#0f2035", color:"#4a7090", marginLeft:4 }}>2+2</span>
+      </div>
+      <div style={{ fontSize:".58rem", color:"#2a5070", marginBottom:10 }}>
+        New → LRU tier · freq&gt;{CFG.hybrid_threshold} → graduate to LFU tier
+      </div>
+
+      {lastGrad && (
+        <div style={S.gradNote}>
+          ▲ GRADUATED: <b>{lastGrad.split("=").pop()}</b> promoted LRU → LFU (freq &gt; {CFG.hybrid_threshold})
+        </div>
+      )}
+
+      <div style={S.hybridTiers}>
+        {/* LRU tier */}
+        <div style={S.tierBox}>
+          <div style={{ ...S.tierLabel, color:"#00c8ff" }}>◦ LRU TIER (cap:{H_LRU_CAP}) · new items</div>
+          {snap.lru.length === 0
+            ? Array.from({ length: H_LRU_CAP }, (_, i) => <EmptySlot key={i} label="empty" />)
+            : snap.lru.map((e, i) => (
+                <div key={e.url} style={{ ...S.entry, background: i === 0 ? "rgba(0,200,255,.05)" : "rgba(0,0,0,.3)" }}>
+                  <div style={{ ...S.entryRank, background:"#00c8ff22", color:"#00c8ff", border:"1px solid #00c8ff33", fontSize:".55rem" }}>
+                    {["MRU","LRU"][i] || i+1}
+                  </div>
+                  <span style={{ ...S.entryUrl, fontSize:".62rem", color:"#c0d8f0" }}>{e.label}</span>
+                  <span style={{ fontSize:".58rem", color:"#2a6080" }}>g:{snap.gFreq[e.url]||1}</span>
+                </div>
+              ))
+          }
+          {snap.lru.length < H_LRU_CAP && Array.from({ length: H_LRU_CAP - snap.lru.length }, (_,i) => <EmptySlot key={`rl${i}`} label="empty" />)}
+        </div>
+
+        {/* LFU tier */}
+        <div style={{ ...S.tierBox, borderColor:"rgba(0,230,118,.2)" }}>
+          <div style={{ ...S.tierLabel, color:"#00e676" }}>★ LFU TIER (cap:{H_LFU_CAP}) · frequent</div>
+          {snap.lfu.length === 0
+            ? Array.from({ length: H_LFU_CAP }, (_, i) => <EmptySlot key={i} label="empty" />)
+            : snap.lfu.map((e) => (
+                <div key={e.url} style={{ ...S.entry, background:"rgba(0,230,118,.04)", borderColor:"rgba(0,230,118,.1)" }}>
+                  <div style={{ ...S.entryRank, background:"#00e67622", color:"#00e676", border:"1px solid #00e67633", fontSize:".55rem" }}>
+                    f:{e.freq}
+                  </div>
+                  <span style={{ ...S.entryUrl, fontSize:".62rem", color:"#c0d8f0" }}>{e.label}</span>
+                  <span style={{ fontSize:".58rem", color:"#2a6040" }}>g:{snap.gFreq[e.url]||1}</span>
+                </div>
+              ))
+          }
+          {snap.lfu.length < H_LFU_CAP && Array.from({ length: H_LFU_CAP - snap.lfu.length }, (_,i) => <EmptySlot key={`fl${i}`} label="empty" />)}
+        </div>
+      </div>
+
+      {/* global_freq_ map */}
+      {Object.keys(snap.gFreq).length > 0 && (
+        <div style={{ marginTop:8 }}>
+          <div style={{ fontSize:".58rem", color:"#2a5070", letterSpacing:1, marginBottom:4 }}>GLOBAL_FREQ MAP</div>
+          <div style={S.gFreqRow}>
+            {Object.entries(snap.gFreq).map(([url, f]) => (
+              <span key={url} style={{
+                ...S.gFreqItem,
+                borderColor: f > CFG.hybrid_threshold ? "rgba(0,230,118,.3)" : "#0a1a2a",
+                color: f > CFG.hybrid_threshold ? "#00e676" : "#4a7090",
+              }}>
+                {url.split("=").pop()}:{f}
+              </span>
+            ))}
+          </div>
+          <div style={{ fontSize:".56rem", color:"#1a3050", marginTop:4 }}>
+            * bold green = freq &gt; threshold({CFG.hybrid_threshold}) → already in LFU tier
+          </div>
+        </div>
+      )}
+
+      <div style={S.statsRow}>
+        {[["HITS",stats.hits,"#00e676"],["MISSES",stats.misses,"#ff6d35"],["EVICT",stats.evictions,"#ffc940"],["RATIO",hitRatio(stats)+"%","#00e676"]].map(([l,v,c])=>(
+          <div key={l} style={S.stat}>
+            <div style={{ ...S.statVal, color:c }}>{v}</div>
+            <div style={S.statLbl}>{l}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════
+//  Main Component
+// ══════════════════════════════════════════════════════════
+export default function CacheSim() {
+  const lruC    = useRef(new LRU(CFG.max_entries));
+  const lfuC    = useRef(new LFU(CFG.max_entries));
+  const hybC    = useRef(new Hybrid());
+  const benchIdx = useRef(0);
+
+  const [customUrl, setCustomUrl] = useState("");
+  const [flashes, setFlashes]     = useState({ lru:null, lfu:null, hyb:null });
+  const [lastGrad, setLastGrad]   = useState(null);
+  const [isBenching, setIsBenching] = useState(false);
+
+  const [st, setSt] = useState({
+    lruSnap: [], lfuSnap: [],
+    hybSnap: { lru:[], lfu:[], gFreq:{} },
+    lruStats: {hits:0,misses:0,evictions:0},
+    lfuStats: {hits:0,misses:0,evictions:0},
+    hybStats: {hits:0,misses:0,evictions:0},
+    log: [],
+    benchProgress: 0,
+  });
+
+  const doFlash = (key, type) => {
+    setFlashes(f => ({ ...f, [key]: type }));
+    setTimeout(() => setFlashes(f => ({ ...f, [key]: null })), 600);
+  };
+
+  const processRequest = useCallback((url) => {
+    const lrHit = lruC.current.get(url);
+    if (!lrHit) lruC.current.put(url);
+
+    const lfHit = lfuC.current.get(url);
+    if (!lfHit) lfuC.current.put(url);
+
+    const hRes = hybC.current.get(url);
+    if (!hRes.hit) hybC.current.put(url);
+
+    // Flashes
+    doFlash("lru", lrHit ? "hit" : "miss");
+    doFlash("lfu", lfHit ? "hit" : "miss");
+
+    if (hRes.graduated) {
+      setLastGrad(url);
+      setTimeout(() => setLastGrad(null), 3000);
+      setFlashes(f => ({ ...f, hyb: "graduate" }));
+      setTimeout(() => setFlashes(f => ({ ...f, hyb: null })), 1200);
+    } else {
+      doFlash("hyb", hRes.hit ? "hit" : "miss");
+    }
+
+    const logEntry = {
+      url: url.split("=").pop() || url,
+      lru: lrHit ? "HIT" : "MISS",
+      lfu: lfHit ? "HIT" : "MISS",
+      hyb: hRes.hit ? (hRes.graduated ? "HIT+GRAD" : "HIT") : "MISS",
+      time: new Date().toLocaleTimeString("en",{hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"}),
+    };
+
+    setSt(prev => ({
+      lruSnap: lruC.current.snapshot(),
+      lfuSnap: lfuC.current.snapshot(),
+      hybSnap: hybC.current.snapshot(),
+      lruStats: { hits:lruC.current.hits, misses:lruC.current.misses, evictions:lruC.current.evictions },
+      lfuStats: { hits:lfuC.current.hits, misses:lfuC.current.misses, evictions:lfuC.current.evictions },
+      hybStats: { hits:hybC.current.hits, misses:hybC.current.misses, evictions:hybC.current.evictions },
+      log: [logEntry, ...prev.log].slice(0, 25),
+      benchProgress: prev.benchProgress,
+    }));
+  }, []);
+
+  const reset = () => {
+    lruC.current = new LRU(CFG.max_entries);
+    lfuC.current = new LFU(CFG.max_entries);
+    hybC.current = new Hybrid();
+    benchIdx.current = 0;
+    setLastGrad(null);
+    setSt({ lruSnap:[], lfuSnap:[], hybSnap:{lru:[],lfu:[],gFreq:{}},
+      lruStats:{hits:0,misses:0,evictions:0}, lfuStats:{hits:0,misses:0,evictions:0},
+      hybStats:{hits:0,misses:0,evictions:0}, log:[], benchProgress:0 });
+  };
+
+  const runBenchStep = useCallback(() => {
+    if (benchIdx.current >= BENCHMARK_SEQ.length) {
+      setIsBenching(false);
+      return;
+    }
+    const url = BENCHMARK_SEQ[benchIdx.current++];
+    processRequest(url);
+    setSt(prev => ({ ...prev, benchProgress: benchIdx.current }));
+  }, [processRequest]);
+
+  useEffect(() => {
+    if (!isBenching) return;
+    if (benchIdx.current >= BENCHMARK_SEQ.length) { setIsBenching(false); return; }
+    const id = setTimeout(runBenchStep, 280);
+    return () => clearTimeout(id);
+  }, [isBenching, st.benchProgress, runBenchStep]);
+
+  const startBench = () => {
+    reset();
+    setTimeout(() => {
+      benchIdx.current = 0;
+      setIsBenching(true);
+    }, 50);
+  };
+
+  const chartData = [
+    { name: "Hit Ratio %", LRU: hitRatio(st.lruStats), LFU: hitRatio(st.lfuStats), HYBRID: hitRatio(st.hybStats) },
+    { name: "Hits",        LRU: st.lruStats.hits,    LFU: st.lfuStats.hits,    HYBRID: st.hybStats.hits },
+    { name: "Misses",      LRU: st.lruStats.misses,  LFU: st.lfuStats.misses,  HYBRID: st.hybStats.misses },
+    { name: "Evictions",   LRU: st.lruStats.evictions, LFU: st.lfuStats.evictions, HYBRID: st.hybStats.evictions },
+  ];
+
+  return (
+    <div style={S.root}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@700;800&display=swap');
+        * { box-sizing: border-box; }
+        button:hover { filter: brightness(1.3); }
+        @keyframes pulse { 0%,100%{opacity:.6} 50%{opacity:1} }
+        @keyframes fadeIn { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:none} }
+        .log-row { animation: fadeIn .25s ease; }
+      `}</style>
+
+      {/* HEADER */}
+      <div style={S.hdr}>
+        <div>
+          <h1 style={S.title}>PROXY<span style={{color:"#00e676"}}>CACHE</span> SIMULATOR</h1>
+          <p style={S.sub}>HTTP Proxy — LRU / LFU / Hybrid Policy Comparison</p>
+        </div>
+        <div style={S.badges}>
+          {[
+            ["proxy.h", "max_entries", CFG.max_entries, "#00c8ff"],
+            ["proxy.h", "hybrid_threshold", CFG.hybrid_threshold, "#00e676"],
+            ["proxy.h", "default_ttl", CFG.default_ttl+"s", "#ffc940"],
+            ["cache.h", "H_LRU_CAP", H_LRU_CAP, "#a78bfa"],
+            ["cache.h", "H_LFU_CAP", H_LFU_CAP, "#a78bfa"],
+            ["proxy.h", "hybrid_split", (CFG.hybrid_split*100)+"%", "#ff6d35"],
+          ].map(([file, key, val, c]) => (
+            <div key={key} style={{ ...S.badge, borderColor:c+"44", color:"#c0d8f0" }}>
+              <span style={{color:c+"99", fontSize:".55rem"}}>{file}::</span>
+              <span style={{color:"#4a7090"}}>{key}=</span>
+              <span style={{color:c, fontWeight:700}}>{val}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* REQUEST PANEL */}
+      <div style={S.reqPanel}>
+        <span style={S.reqLabel}>SEND REQUEST</span>
+        <div style={S.presets}>
+          {URLS.map(u => (
+            <button key={u.key} onClick={() => processRequest(u.url)}
+              style={{ ...S.urlBtn, borderColor:u.color+"66", color:u.color, background:`${u.color}0a` }}>
+              <div style={{ ...S.phaseDot, background:u.color }} />
+              <span style={S.urlKey}>{u.key}</span>
+              <span style={{fontSize:".6rem", color:u.color+"88"}}>[{u.phase}]</span>
+            </button>
+          ))}
+        </div>
+        <div style={S.customRow}>
+          <input
+            style={S.customInput}
+            value={customUrl}
+            onChange={e => setCustomUrl(e.target.value)}
+            onKeyDown={e => { if(e.key==="Enter" && customUrl.trim()) { processRequest(customUrl.trim()); }}}
+            placeholder="http://example.com/?q=custom"
+          />
+          <button style={S.sendBtn} onClick={() => { if(customUrl.trim()) processRequest(customUrl.trim()); }}>
+            SEND
+          </button>
+          <button
+            style={{ ...S.benchBtn, opacity: isBenching ? .6 : 1 }}
+            onClick={startBench}
+            disabled={isBenching}
+          >
+            {isBenching ? `▶ BENCH ${st.benchProgress}/${BENCHMARK_SEQ.length}` : "▶ RUN BENCHMARK (30 req)"}
+          </button>
+          <button style={S.resetBtn} onClick={reset}>RESET</button>
+        </div>
+        <div style={S.benchNote}>
+          Benchmark mirrors compare.sh: Phase1:VIP×10 → Phase2:Junk×8 → Phase3:Bots×4 → Phase4:Trends×4 → Phase5:FinalExam×4
+        </div>
+      </div>
+
+      {/* TICKER */}
+      {st.log.length > 0 && (
+        <div style={S.ticker}>
+          {st.log.slice(0,10).map((l,i) => (
+            <span key={i} style={{opacity: Math.max(0.2, 1 - i*0.08)}}>
+              <span style={{color:"#2a5070"}}>{l.time} </span>
+              <span style={{color:"#00c8ff"}}>{l.url} </span>
+              <span style={{color:l.lru==="HIT"?"#00e676":"#ff6d35"}}>LRU:{l.lru} </span>
+              <span style={{color:l.lfu==="HIT"?"#00e676":"#ff6d35"}}>LFU:{l.lfu} </span>
+              <span style={{color:l.hyb.startsWith("HIT")?"#00e676":"#ff6d35"}}>HYB:{l.hyb}</span>
+              <span style={{color:"#0f2035"}}> ── </span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* 3 CACHE PANELS */}
+      <div style={S.grid}>
+        <LRUPanel snap={st.lruSnap} stats={st.lruStats} flash={flashes.lru} cap={CFG.max_entries} />
+        <LFUPanel snap={st.lfuSnap} stats={st.lfuStats} flash={flashes.lfu} cap={CFG.max_entries} />
+        <HybridPanel snap={st.hybSnap} stats={st.hybStats} flash={flashes.hyb} lastGrad={lastGrad} />
+      </div>
+
+      {/* REQUEST LOG */}
+      {st.log.length > 0 && (
+        <div style={S.logCard}>
+          <div style={{ ...S.cardTitle, marginBottom:10 }}>
+            <div style={{ ...S.cardDot, background:"#4a7090" }} />
+            <span style={{color:"#4a7090", fontSize:".65rem", letterSpacing:2}}>REQUEST LOG</span>
+            <span style={{fontSize:".6rem", color:"#2a4060", marginLeft:"auto"}}>{(lruC.current.hits+lruC.current.misses)} total requests</span>
+          </div>
+          <table style={S.logTable}>
+            <thead>
+              <tr style={{borderBottom:"1px solid #0a1a2a"}}>
+                {["TIME","URL","LRU","LFU","HYBRID","NOTES"].map(h=>(
+                  <th key={h} style={{padding:"4px 8px",textAlign:"left",color:"#2a4060",fontSize:".6rem",letterSpacing:1,fontWeight:400}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {st.log.slice(0,12).map((l,i) => (
+                <tr key={i} className="log-row" style={{borderBottom:"1px solid #060e18"}}>
+                  <td style={{padding:"4px 8px",color:"#2a4060"}}>{l.time}</td>
+                  <td style={{padding:"4px 8px",color:"#00c8ff"}}>{l.url}</td>
+                  <td style={{padding:"4px 8px",color:l.lru==="HIT"?"#00e676":"#ff6d35",fontWeight:600}}>{l.lru}</td>
+                  <td style={{padding:"4px 8px",color:l.lfu==="HIT"?"#00e676":"#ff6d35",fontWeight:600}}>{l.lfu}</td>
+                  <td style={{padding:"4px 8px",color:l.hyb.startsWith("HIT")?"#00e676":"#ff6d35",fontWeight:600}}>{l.hyb}</td>
+                  <td style={{padding:"4px 8px",color:"#1a3050",fontSize:".6rem"}}>
+                    {l.hyb==="HIT+GRAD" ? "🔺 graduated LRU→LFU" : ""}
+                    {l.lru!==l.hyb||l.lfu!==l.hyb ? (l.hyb.startsWith("HIT")&&l.lru==="MISS" ? "✦ Hybrid wins vs LRU" : "") : ""}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* COMPARISON CHART */}
+      <div style={S.chartCard}>
+        <div style={{ ...S.cardTitle, marginBottom:12 }}>
+          <div style={{ ...S.cardDot, background:"#00e676" }} />
+          <span style={{color:"#00e676", fontSize:".65rem", letterSpacing:2}}>POLICY COMPARISON</span>
+          <span style={{fontSize:".58rem", color:"#2a4060", marginLeft:"auto"}}>LRU vs LFU vs HYBRID · live stats</span>
+        </div>
+        <ResponsiveContainer width="100%" height={200}>
+          <BarChart data={chartData} margin={{top:4,right:16,left:-10,bottom:0}}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#0a1624" />
+            <XAxis dataKey="name" tick={{fill:"#3a6080",fontSize:10,fontFamily:"'JetBrains Mono',monospace"}} axisLine={{stroke:"#0f2035"}} />
+            <YAxis tick={{fill:"#3a6080",fontSize:10,fontFamily:"'JetBrains Mono',monospace"}} axisLine={{stroke:"#0f2035"}} />
+            <Tooltip
+              contentStyle={{background:"#070f17",border:"1px solid #0f2035",fontFamily:"'JetBrains Mono',monospace",fontSize:11}}
+              labelStyle={{color:"#c0d8f0"}} cursor={{fill:"rgba(255,255,255,.03)"}}
+            />
+            <Legend wrapperStyle={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,paddingTop:8}} />
+            <Bar dataKey="LRU"    fill="#00c8ff" fillOpacity={.75} radius={[2,2,0,0]} />
+            <Bar dataKey="LFU"    fill="#ffc940" fillOpacity={.75} radius={[2,2,0,0]} />
+            <Bar dataKey="HYBRID" fill="#00e676" fillOpacity={.75} radius={[2,2,0,0]} />
+          </BarChart>
+        </ResponsiveContainer>
+        <div style={{display:"flex",gap:16,marginTop:10,flexWrap:"wrap"}}>
+          {[
+            ["LRU weakness","Recency-based. Bot floods (one-time URLs) evict hot content. Good for streaming.","#00c8ff"],
+            ["LFU weakness","Frequency-based. Old popular-then-stale items survive. New trends get evicted immediately.","#ffc940"],
+            ["Hybrid advantage","New content gets a chance in LRU. Sustained popular items graduate to LFU. Best of both.","#00e676"],
+          ].map(([t,d,c])=>(
+            <div key={t} style={{flex:1,minWidth:180,padding:"8px 10px",border:`1px solid ${c}22`,background:`${c}08`}}>
+              <div style={{fontSize:".62rem",fontWeight:700,color:c,marginBottom:4}}>{t}</div>
+              <div style={{fontSize:".6rem",color:"#4a7090",lineHeight:1.5}}>{d}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

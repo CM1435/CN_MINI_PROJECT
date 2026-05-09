@@ -4,63 +4,93 @@
 *       LRU / LFU  |  Multi-Threaded               *
 ****************************************************
 
-[2026-04-05 11:22:14] [ INFO] Proxy listening on port 8080
-[2026-04-05 11:22:14] [ INFO] Policy: LFU
-[2026-04-05 11:22:14] [ INFO] Max entries: 4 | Max size: 50.00 MB
-[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:17] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:17] [ INFO] [MISS] GET http://example.com/?q=junk1 — 786 B
-[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=junk2 — 796 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 786 B
-[2026-04-05 11:22:18] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 796 B
-[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot1 — 796 B
-[2026-04-05 11:22:18] [ INFO] [MISS] GET http://example.com/?q=bot2 — 786 B
-[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot3 — 796 B
-[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=bot4 — 796 B
+[2026-05-09 09:45:35] [ INFO] Proxy listening on port 8080
+[2026-05-09 09:45:35] [ INFO] Policy: LFU
+[2026-05-09 09:45:35] [ INFO] Max entries: 6 | Max size: 50.00 MB
+[2026-05-09 09:45:38] [ INFO] [MISS] GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:39] [ INFO] [MISS] GET http://example.com/?q=vip2 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:39] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 790 B
+
++---------------------- CACHE STATS ----------------------+
+|  Hits:                       8                          |
+|  Misses:                     3                          |
+|  Hit Ratio:              72.7%                         |
+|  Evictions:                  0                          |
+|  Bandwidth Saved:       6.2 KB                  |
+|  Active Conns:               1                       |
+|  Cache Entries:              2                          |
+|  Cache Size:            1.5 KB                     |
++---------------------------------------------------------+
+[2026-05-09 09:45:40] [ INFO] [MISS] GET http://example.com/?q=junk1 — 795 B
+[2026-05-09 09:45:41] [ INFO] [MISS] GET http://example.com/?q=junk2 — 790 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 795 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 790 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 795 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 790 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk1 — 795 B
+[2026-05-09 09:45:41] [ INFO] [HIT]  GET http://example.com/?q=junk2 — 790 B
+[2026-05-09 09:45:44] [ INFO] [MISS] GET http://example.com/?q=bot1 — 795 B
+[2026-05-09 09:45:44] [ INFO] [MISS] GET http://example.com/?q=bot2 — 790 B
 
 +---------------------- CACHE STATS ----------------------+
 |  Hits:                      14                          |
-|  Misses:                     9                          |
-|  Hit Ratio:              60.9%                         |
-|  Evictions:                  4                          |
-|  Bandwidth Saved:      10.9 KB                  |
+|  Misses:                     7                          |
+|  Hit Ratio:              66.7%                         |
+|  Evictions:                  0                          |
+|  Bandwidth Saved:      10.8 KB                  |
 |  Active Conns:               1                       |
-|  Cache Entries:              4                          |
-|  Cache Size:            3.1 KB                     |
+|  Cache Entries:              6                          |
+|  Cache Size:            4.6 KB                     |
 +---------------------------------------------------------+
-[2026-04-05 11:22:19] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
-[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
-[2026-04-05 11:22:20] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
-[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
-[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 796 B
-[2026-04-05 11:22:21] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 796 B
-[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend1 — 796 B
-[2026-04-05 11:22:21] [ INFO] [MISS] GET http://example.com/?q=trend2 — 786 B
+[2026-05-09 09:45:45] [ INFO] [MISS] GET http://example.com/?q=bot3 — 794 B
+[2026-05-09 09:45:46] [ INFO] [MISS] GET http://example.com/?q=bot4 — 790 B
+[2026-05-09 09:45:47] [ INFO] [MISS] GET http://example.com/?q=trend1 — 790 B
+[2026-05-09 09:45:49] [ INFO] [MISS] GET http://example.com/?q=trend2 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=trend1 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=trend2 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=vip1 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=vip2 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=trend1 — 790 B
+[2026-05-09 09:45:49] [ INFO] [HIT]  GET http://example.com/?q=trend2 — 790 B
 
 +---------------------- CACHE STATS ----------------------+
-|  Hits:                      16                          |
-|  Misses:                    14                          |
-|  Hit Ratio:              53.3%                         |
-|  Evictions:                 10                          |
-|  Bandwidth Saved:      12.4 KB                  |
+|  Hits:                      20                          |
+|  Misses:                    10                          |
+|  Hit Ratio:              66.7%                         |
+|  Evictions:                  4                          |
+|  Bandwidth Saved:      15.4 KB                  |
 |  Active Conns:               0                       |
-|  Cache Entries:              4                          |
-|  Cache Size:            3.1 KB                     |
+|  Cache Entries:              6                          |
+|  Cache Size:            4.6 KB                     |
 +---------------------------------------------------------+
 
 +---------------------- CACHE STATS ----------------------+
-|  Hits:                      16                          |
-|  Misses:                    14                          |
-|  Hit
+|  Hits:                      20                          |
+|  Misses:                    10                          |
+|  Hit Ratio:              66.7%                         |
+|  Evictions:                  4                          |
+|  Bandwidth Saved:      15.4 KB                  |
+|  Active Conns:               0                       |
+|  Cache Entries:              6                          |
+|  Cache Size:            4.6 KB                     |
++---------------------------------------------------------+
+
++---------------------- CACHE STATS ----------------------+
+|  Hits:                      20                          |
+|  Misses:                    10                          |
+|  Hit Ratio:              66.7%                         |
+|  Evictions:                  4                          |
+|  Bandwidth Saved:      15.4 KB                  |
+|  Active Conns:               0                       |
+|  Cache Entries:              6                          |
+|  Cache Size:            4.6 KB                     |
++---------------------------------------------------------+
+
+[SIGNAL] Caught signal 2 — shutting down...

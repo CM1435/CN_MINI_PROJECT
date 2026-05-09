@@ -38,7 +38,7 @@ ProxyServer::ProxyServer(const ProxyConfig& cfg)
     : cfg_(cfg),
       lru_cache_(cfg.max_entries, cfg.max_bytes, stats_),
       lfu_cache_(cfg.max_entries, cfg.max_bytes, stats_),
-      hybrid_cache_(cfg.max_entries, cfg.max_bytes, stats_) {}
+      hybrid_cache_(cfg.max_entries, cfg.max_bytes, stats_, cfg.hybrid_threshold) {}
 
 ProxyServer::~ProxyServer() {
     stop();

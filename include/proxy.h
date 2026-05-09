@@ -21,7 +21,7 @@
 
 struct ProxyConfig {
     int           port           = 8080;
-    size_t        max_entries    = 4;        // <--- Set to 4 for the final test
+    size_t        max_entries    = 10;        // <--- Set to 4 for the final test
     size_t        max_bytes      = 50 * 1024 * 1024;
     int           default_ttl    = 300;
     

@@ -1,0 +1,3562 @@
+
+========== File: ./Makefile ==========
+
+CXX      = g++
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -pthread
+INCLUDES = -Iinclude
+SRC      = src/main.cpp src/proxy.cpp src/cache.cpp src/logger.cpp
+TARGET   = proxy_cache
+
+.PHONY: all clean run debug
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SRC) -o $(TARGET)
+	@echo "\n✅  Build successful → ./$(TARGET)"
+	@echo "   Run with: ./$(TARGET) -p 8080 -P lru -v"
+
+debug: CXXFLAGS += -g -DDEBUG
+debug: $(TARGET)
+
+clean:
+	rm -f $(TARGET) proxy.log
+
+run: all
+	./$(TARGET) -p 8080 -P lru -t 300 -m 50 -v
+
+run-lfu: all
+	./$(TARGET) -p 8080 -P lfu -t 300 -m 50 -v
+
+bench:
+	@echo "Running benchmark (proxy must be running on :8080)..."
+	python3 scripts/bench.py --proxy localhost:8080 --rounds 3
+
+========== File: ./include/stats_writer.h ==========
+
+#pragma once
+
+// Windows socket headers must come first to avoid conflicts
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
+    #include <winsock2.h>
+    #include <windows.h>
+#endif
+
+#include <string>
+#include <fstream>
+#include <mutex>
+#include <deque>
+#include <vector>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <algorithm>
+
+#include "cache.h"
+
+// ─────────────────────────────────────────────
+//  RecentRequest — one logged request entry
+// ─────────────────────────────────────────────
+struct RecentRequest {
+    std::string url;
+    bool        hit;
+    size_t      size;
+    std::string time;
+};
+
+// ─────────────────────────────────────────────
+//  StatsWriter
+// ─────────────────────────────────────────────
+class StatsWriter {
+public:
+    static StatsWriter& instance() {
+        static StatsWriter inst;
+        return inst;
+    }
+
+    void set_output_path(const std::string& path) {
+        path_ = path;
+    }
+
+    void log_request(const std::string& url, bool hit, size_t size) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        std::time_t now = std::time(nullptr);
+        struct tm* tm_info = std::localtime(&now);
+        char buf[12];
+        std::strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+
+        RecentRequest r;
+        r.url  = url;
+        r.hit  = hit;
+        r.size = size;
+        r.time = std::string(buf);
+
+        recent_.push_front(r);
+        if (recent_.size() > 20) {
+            recent_.pop_back();
+        }
+    }
+
+    void write(const CacheStats& stats,
+               size_t cache_entries,
+               size_t cache_bytes,
+               size_t max_entries,
+               size_t max_bytes,
+               const std::string& policy)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        std::ofstream f(path_);
+        if (!f.is_open()) return;
+
+        f << "{\n";
+        f << "  \"hits\":"                << stats.hits               << ",\n";
+        f << "  \"misses\":"              << stats.misses             << ",\n";
+        f << "  \"evictions\":"           << stats.evictions          << ",\n";
+        f << "  \"active_connections\":"  << stats.active_connections << ",\n";
+        f << "  \"bytes_saved\":"         << stats.bytes_saved        << ",\n";
+        f << "  \"total_bytes_served\":"  << stats.total_bytes_served << ",\n";
+        f << "  \"cache_entries\":"       << cache_entries            << ",\n";
+        f << "  \"cache_bytes\":"         << cache_bytes              << ",\n";
+        f << "  \"max_entries\":"         << max_entries              << ",\n";
+        f << "  \"max_bytes\":"           << max_bytes                << ",\n";
+        f << "  \"policy\":\""            << policy                   << "\",\n";
+        f << "  \"recent_requests\": [\n";
+
+        bool first = true;
+        for (size_t i = 0; i < recent_.size(); i++) {
+            const RecentRequest& r = recent_[i];
+            if (!first) f << ",\n";
+            f << "    {"
+              << "\"url\":\""  << escape(r.url) << "\","
+              << "\"hit\":"    << (r.hit ? "true" : "false") << ","
+              << "\"size\":"   << r.size << ","
+              << "\"time\":\"" << r.time << "\""
+              << "}";
+            first = false;
+        }
+
+        f << "\n  ]\n}\n";
+        f.flush();
+        f.close();
+    }
+
+private:
+    StatsWriter() : path_("stats.json") {}
+
+    std::string               path_;
+    std::mutex                mutex_;
+    std::deque<RecentRequest> recent_;
+
+    std::string escape(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) {
+            char c = s[i];
+            if (c == '"'  ) { out += "\\\""; continue; }
+            if (c == '\\' ) { out += "\\\\"; continue; }
+            out += c;
+        }
+        return out;
+    }
+};
+
+========== File: ./include/cache.h ==========
+
+#pragma once
+#include <string>
+#include <unordered_map>
+#include <list>
+#include <mutex>
+#include <chrono>
+#include <vector>
+#include <iostream>
+
+// ─────────────────────────────────────────────
+//  CacheEntry — one cached HTTP response
+// ─────────────────────────────────────────────
+struct CacheEntry {
+    std::string url;
+    std::string response;       // raw HTTP response bytes
+    size_t      size;           // bytes
+    int         frequency;      // for LFU
+    int         ttl_seconds;    // time-to-live
+    std::chrono::steady_clock::time_point inserted_at;
+    std::chrono::steady_clock::time_point last_accessed;
+
+    CacheEntry() : size(0), frequency(1), ttl_seconds(300) {}
+
+    CacheEntry(const std::string& u, const std::string& r, int ttl = 300)
+        : url(u), response(r), size(r.size()), frequency(1), ttl_seconds(ttl),
+          inserted_at(std::chrono::steady_clock::now()),
+          last_accessed(std::chrono::steady_clock::now()) {}
+
+    bool is_expired() const {
+        auto now = std::chrono::steady_clock::now();
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - inserted_at).count();
+        return age >= ttl_seconds;
+    }
+};
+
+// ─────────────────────────────────────────────
+//  CacheStats — runtime statistics
+// ─────────────────────────────────────────────
+struct CacheStats {
+    long long hits        = 0;
+    long long misses      = 0;
+    long long evictions   = 0;
+    long long total_bytes_served  = 0;
+    long long bytes_saved         = 0;   // bytes served from cache (not fetched)
+    int       active_connections  = 0;
+
+    double hit_ratio() const {
+        long long total = hits + misses;
+        return total == 0 ? 0.0 : (100.0 * hits / total);
+    }
+};
+
+// ─────────────────────────────────────────────
+//  Eviction Policy enum
+// ─────────────────────────────────────────────
+enum class EvictionPolicy { LRU, LFU, HYBRID };
+
+// ─────────────────────────────────────────────
+//  LRUCache
+// ─────────────────────────────────────────────
+class LRUCache {
+public:
+    explicit LRUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
+        : max_entries_(max_entries), max_bytes_(max_bytes),
+          current_bytes_(0), stats_(stats) {}
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    bool remove(const std::string& url); // Added for Hybrid support
+    void evict_expired();
+    size_t size() const { return map_.size(); }
+    size_t bytes() const { return current_bytes_; }
+    void   print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    size_t current_bytes_;
+
+    // list front = most recently used
+    std::list<CacheEntry>                                   lru_list_;
+    std::unordered_map<std::string, std::list<CacheEntry>::iterator> map_;
+
+    CacheStats& stats_;
+    mutable std::mutex mutex_;
+
+    void evict_one();
+};
+
+// ─────────────────────────────────────────────
+//  LFUCache
+// ─────────────────────────────────────────────
+class LFUCache {
+public:
+    explicit LFUCache(size_t max_entries, size_t max_bytes, CacheStats& stats)
+        : max_entries_(max_entries), max_bytes_(max_bytes),
+          current_bytes_(0), min_freq_(0), stats_(stats) {}
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    void reset_ttl(const std::string& url, int ttl); // Added for Hybrid support
+    void evict_expired();
+    size_t size() const { return key_map_.size(); }
+    size_t bytes() const { return current_bytes_; }
+    void   print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    size_t current_bytes_;
+    int    min_freq_;
+
+    struct Node {
+        CacheEntry entry;
+        std::list<std::string>::iterator it;
+    };
+
+    std::unordered_map<std::string, Node>                      key_map_;
+    std::unordered_map<int, std::list<std::string>>            freq_map_;
+
+    CacheStats& stats_;
+    mutable std::mutex mutex_;
+
+    void increment_freq(const std::string& url);
+    void evict_one();
+};
+
+// ─────────────────────────────────────────────
+//  HybridCache (IEEE Paper Implementation)
+// ─────────────────────────────────────────────
+class HybridCache {
+public:
+    HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats, int threshold = 5);
+
+    bool get(const std::string& url, std::string& out_response);
+    void put(const std::string& url, const std::string& response, int ttl = 300);
+    void evict_expired();
+    size_t size() const;
+    size_t bytes() const;
+    void print_contents() const;
+
+private:
+    size_t max_entries_;
+    size_t max_bytes_;
+    int threshold_T_;
+    CacheStats& stats_;
+
+    // The paper specifies splitting the cache into LRU (Size P) and LFU (Size Q)
+    LRUCache lru_tier_;
+    LFUCache lfu_tier_;
+
+    std::unordered_map<std::string, int> global_freq_;
+    mutable std::mutex mutex_;
+};
+========== File: ./include/proxy.h ==========
+
+#pragma once
+#include "cache.h"
+#include <string>
+#include <atomic>
+#include <set>
+
+// ─────────────────────────────────────────────
+//  ProxyConfig — runtime configuration
+// ─────────────────────────────────────────────
+// struct ProxyConfig {
+//     int           port           = 8080;
+//     // size_t        max_entries    = 500;
+//     size_t        max_entries    = 3;
+//     size_t        max_bytes      = 50 * 1024 * 1024;  // 50 MB
+//     int           default_ttl    = 300;               // seconds
+//     EvictionPolicy policy        = EvictionPolicy::LRU;
+//     bool          verbose        = false;
+//     std::set<std::string> blacklist;                  // blocked domains
+// };
+
+
+struct ProxyConfig {
+    int           port           = 8080;
+    size_t        max_entries    = 4;        // <--- Set to 4 for the final test
+    size_t        max_bytes      = 50 * 1024 * 1024;
+    int           default_ttl    = 300;
+    
+    // --- THE NEW PRO FEATURES ---
+    int           hybrid_threshold = 3;      // <--- Added back!
+    double        hybrid_split    = 0.5;     // <--- Added back!
+    // ----------------------------
+
+    EvictionPolicy policy        = EvictionPolicy::LRU;
+    bool          verbose        = false;
+    std::set<std::string> blacklist;
+};
+
+// ─────────────────────────────────────────────
+//  HttpRequest — parsed HTTP request
+// ─────────────────────────────────────────────
+struct HttpRequest {
+    std::string method;
+    std::string url;
+    std::string host;
+    int         port = 80;
+    std::string path;
+    std::string raw;
+    bool        valid = false;
+};
+
+// ─────────────────────────────────────────────
+//  ProxyServer
+// ─────────────────────────────────────────────
+class ProxyServer {
+public:
+    explicit ProxyServer(const ProxyConfig& cfg);
+    ~ProxyServer();
+
+    void start();    // blocking — runs accept loop
+    void stop();
+
+    const CacheStats& stats() const { return stats_; }
+
+    // connection handler (runs in its own thread — public for pthread access)
+    void handle_client(int client_fd);
+
+private:
+    ProxyConfig   cfg_;
+    CacheStats    stats_;
+    LRUCache      lru_cache_;
+    LFUCache      lfu_cache_;
+    HybridCache   hybrid_cache_;
+    int           server_fd_ = -1;
+    std::atomic<bool> running_{false};
+
+    // HTTP helpers
+    HttpRequest   parse_request(const std::string& raw);
+    std::string   fetch_from_origin(const HttpRequest& req);
+    int           parse_ttl_from_headers(const std::string& response);
+    bool          is_cacheable(const HttpRequest& req, const std::string& response);
+    bool          is_blacklisted(const std::string& host);
+
+    // cache dispatch (LRU or LFU based on config)
+    bool cache_get(const std::string& url, std::string& out);
+    void cache_put(const std::string& url, const std::string& resp, int ttl);
+
+    // socket helpers
+    int  create_server_socket();
+    int  connect_to_host(const std::string& host, int port);
+    void send_all(int fd, const std::string& data);
+    std::string recv_all(int fd);
+    std::string recv_http_response(int fd);
+
+    // logging
+    void log(const std::string& msg) const;
+    void log_request(const HttpRequest& req, bool cache_hit, size_t bytes) const;
+};
+========== File: ./include/logger.h ==========
+
+#pragma once
+#include "cache.h"
+#include <string>
+#include <fstream>
+#include <mutex>
+#include <ctime>
+
+// ─────────────────────────────────────────────
+//  Logger — thread-safe file + console logger
+// ─────────────────────────────────────────────
+class Logger {
+public:
+    enum class Level { INFO, WARN, ERROR, DEBUG };
+
+    static Logger& instance() {
+        static Logger inst;
+        return inst;
+    }
+
+    void init(const std::string& logfile, bool verbose = false);
+    void log(Level level, const std::string& msg);
+    void info (const std::string& msg) { log(Level::INFO,  msg); }
+    void warn (const std::string& msg) { log(Level::WARN,  msg); }
+    void error(const std::string& msg) { log(Level::ERROR, msg); }
+    void debug(const std::string& msg) { if(verbose_) log(Level::DEBUG, msg); }
+
+private:
+    Logger() = default;
+    std::ofstream  file_;
+    std::mutex     mutex_;
+    bool           verbose_ = false;
+
+    std::string timestamp();
+    std::string level_str(Level l);
+};
+
+// ─────────────────────────────────────────────
+//  StatsDisplay — prints live stats to terminal
+// ─────────────────────────────────────────────
+class StatsDisplay {
+public:
+    static void print_banner();
+    static void print_stats(const CacheStats& stats, size_t cache_entries, size_t cache_bytes);
+    static void print_separator();
+    static std::string format_bytes(size_t bytes);
+};
+
+========== File: ./dashboard.html ==========
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ProxyCache — Live Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:       #03080d;
+  --surface:  #070f17;
+  --card:     #0a1622;
+  --border:   #0f2035;
+  --accent:   #00c8ff;
+  --green:    #00e676;
+  --orange:   #ff6d35;
+  --yellow:   #ffc940;
+  --red:      #ff4757;
+  --dim:      #2a4a60;
+  --text:     #b8d4e8;
+  --text2:    #4a7090;
+  --glow-b:   rgba(0,200,255,.18);
+  --glow-g:   rgba(0,230,118,.18);
+}
+
+*{margin:0;padding:0;box-sizing:border-box;}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Syne', sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* animated grid bg */
+body::before {
+  content:'';
+  position:fixed;inset:0;
+  background:
+    linear-gradient(rgba(0,200,255,.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,200,255,.025) 1px, transparent 1px);
+  background-size:50px 50px;
+  animation: gridMove 20s linear infinite;
+  pointer-events:none;z-index:0;
+}
+@keyframes gridMove { to { background-position: 50px 50px; } }
+
+/* scan line effect */
+body::after {
+  content:'';
+  position:fixed;inset:0;
+  background: repeating-linear-gradient(
+    0deg, transparent, transparent 2px,
+    rgba(0,0,0,.03) 2px, rgba(0,0,0,.03) 4px
+  );
+  pointer-events:none;z-index:1;
+}
+
+.page { position:relative;z-index:2; padding:20px 24px; max-width:1400px; margin:0 auto; }
+
+/* ── Header ── */
+.header {
+  display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:28px; padding-bottom:16px;
+  border-bottom:1px solid var(--border);
+}
+.header-left { display:flex; align-items:center; gap:16px; }
+.logo-mark {
+  width:42px;height:42px;
+  background: linear-gradient(135deg, var(--accent), #0066ff);
+  clip-path: polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+  display:flex;align-items:center;justify-content:center;
+  font-family:'JetBrains Mono';font-weight:700;font-size:.75rem;color:#fff;
+  box-shadow: 0 0 24px rgba(0,200,255,.5);
+  animation: pulse 3s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{box-shadow:0 0 20px rgba(0,200,255,.4)} 50%{box-shadow:0 0 40px rgba(0,200,255,.8)} }
+
+.logo-text { line-height:1.1; }
+.logo-text h1 { font-size:1.4rem; font-weight:800; letter-spacing:-0.5px; color:#fff; }
+.logo-text h1 span { color:var(--accent); }
+.logo-text p  { font-size:.72rem; color:var(--text2); font-family:'JetBrains Mono'; letter-spacing:1px; text-transform:uppercase; }
+
+.header-right { display:flex; align-items:center; gap:20px; }
+.status-pill {
+  display:flex;align-items:center;gap:8px;
+  padding:6px 14px; border:1px solid var(--border);
+  background:var(--card);
+  font-family:'JetBrains Mono';font-size:.72rem;color:var(--text2);
+}
+.status-dot {
+  width:8px;height:8px;border-radius:50%;
+  background:var(--green);
+  box-shadow:0 0 8px var(--green);
+  animation:blink 1.5s ease-in-out infinite;
+}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.status-dot.offline { background:var(--red); box-shadow:0 0 8px var(--red); animation:none; }
+
+#last-update {
+  font-family:'JetBrains Mono';font-size:.7rem;color:var(--text2);
+}
+
+/* ── KPI Row ── */
+.kpi-row {
+  display:grid;
+  grid-template-columns:repeat(6,1fr);
+  gap:12px;
+  margin-bottom:20px;
+}
+@media(max-width:1100px){ .kpi-row{grid-template-columns:repeat(3,1fr);} }
+@media(max-width:600px) { .kpi-row{grid-template-columns:repeat(2,1fr);} }
+
+.kpi {
+  background:var(--card);
+  border:1px solid var(--border);
+  padding:16px;
+  position:relative;
+  overflow:hidden;
+  transition:border-color .3s;
+}
+.kpi::before {
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:var(--kpi-color,var(--accent));
+  opacity:.7;
+}
+.kpi:hover { border-color:var(--kpi-color,var(--accent)); }
+.kpi-label {
+  font-family:'JetBrains Mono';font-size:.62rem;
+  letter-spacing:2px;text-transform:uppercase;
+  color:var(--text2);margin-bottom:8px;
+}
+.kpi-value {
+  font-size:1.8rem;font-weight:800;
+  color:var(--kpi-color,var(--accent));
+  line-height:1;
+  transition:all .4s;
+}
+.kpi-sub {
+  font-family:'JetBrains Mono';font-size:.65rem;
+  color:var(--text2);margin-top:4px;
+}
+.kpi-icon {
+  position:absolute;right:14px;top:50%;transform:translateY(-50%);
+  font-size:1.6rem;opacity:.1;
+}
+
+/* ── Grid Layout ── */
+.grid-main {
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr;
+  grid-template-rows:auto auto;
+  gap:16px;
+  margin-bottom:16px;
+}
+@media(max-width:1000px){ .grid-main{grid-template-columns:1fr 1fr;} }
+@media(max-width:640px) { .grid-main{grid-template-columns:1fr;} }
+
+.grid-bottom {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+}
+@media(max-width:780px){ .grid-bottom{grid-template-columns:1fr;} }
+
+/* ── Card ── */
+.card {
+  background:var(--card);
+  border:1px solid var(--border);
+  padding:18px;
+  transition:border-color .3s;
+}
+.card:hover { border-color:rgba(0,200,255,.2); }
+.card-header {
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:16px;
+}
+.card-title {
+  font-family:'JetBrains Mono';font-size:.68rem;
+  letter-spacing:2px;text-transform:uppercase;
+  color:var(--accent);
+  display:flex;align-items:center;gap:8px;
+}
+.card-title::before {
+  content:'';width:3px;height:12px;background:var(--accent);
+  box-shadow:0 0 8px var(--accent);
+}
+.card-badge {
+  font-family:'JetBrains Mono';font-size:.6rem;
+  padding:2px 8px;border:1px solid var(--border);
+  color:var(--text2);text-transform:uppercase;letter-spacing:1px;
+}
+.card-badge.lfu { border-color:var(--yellow);color:var(--yellow);background:rgba(255,201,64,.06); }
+.card-badge.hybrid { border-color:var(--green);color:var(--green);background:rgba(0,230,118,.06); }
+
+/* ── Hit Ratio Gauge ── */
+.gauge-wrap {
+  display:flex;flex-direction:column;align-items:center;
+  padding:8px 0;
+}
+.gauge-svg { width:180px;height:100px;overflow:visible; }
+.gauge-track { fill:none; stroke:var(--border); stroke-width:12; }
+.gauge-fill  { fill:none; stroke-width:12; stroke-linecap:round;
+               transition:stroke-dashoffset 1s cubic-bezier(.4,0,.2,1),stroke 1s; }
+.gauge-num {
+  font-size:2.2rem;font-weight:800;
+  fill:var(--accent);font-family:'Syne';
+  transition:all .5s;
+}
+.gauge-label { fill:var(--text2);font-size:10px;font-family:'JetBrains Mono'; }
+
+.gauge-stats {
+  display:flex;gap:24px;margin-top:12px;
+}
+.gs { text-align:center; }
+.gs-val { font-size:1.1rem;font-weight:700; }
+.gs-label { font-family:'JetBrains Mono';font-size:.62rem;color:var(--text2);text-transform:uppercase; }
+
+/* ── Timeline Chart ── */
+.chart-wrap { position:relative;height:160px; }
+
+/* ── LRU vs LFU vs Hybrid ── */
+.compare-wrap { position:relative;height:180px; }
+
+/* ── Cache Fill Bar ── */
+.fill-bar-wrap { padding:8px 0; }
+.fill-info { display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px; }
+.fill-label { font-family:'JetBrains Mono';font-size:.68rem;color:var(--text2); }
+.fill-val   { font-family:'JetBrains Mono';font-size:.8rem;color:var(--accent); }
+.fill-track {
+  height:8px;background:var(--border);
+  position:relative;overflow:hidden;
+}
+.fill-bar {
+  height:100%;
+  background:linear-gradient(90deg,var(--accent),var(--green));
+  box-shadow:0 0 12px var(--accent);
+  transition:width 1s cubic-bezier(.4,0,.2,1);
+  width:0%;
+}
+.fill-bar.warn { background:linear-gradient(90deg,var(--yellow),var(--orange)); box-shadow:0 0 12px var(--yellow); }
+.fill-bar.full { background:linear-gradient(90deg,var(--orange),var(--red)); box-shadow:0 0 12px var(--red); }
+
+.fill-section { margin-bottom:14px; }
+
+/* ── Request Log ── */
+.req-log { max-height:200px;overflow-y:auto; }
+.req-log::-webkit-scrollbar { width:4px; }
+.req-log::-webkit-scrollbar-track { background:var(--bg); }
+.req-log::-webkit-scrollbar-thumb { background:var(--dim); }
+
+.req-item {
+  display:flex;align-items:center;gap:10px;
+  padding:7px 0;border-bottom:1px solid rgba(15,32,53,.7);
+  font-family:'JetBrains Mono';font-size:.68rem;
+  animation:fadeIn .3s ease;
+}
+@keyframes fadeIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:none}}
+.req-badge {
+  padding:2px 7px;font-size:.6rem;font-weight:700;
+  letter-spacing:1px;flex-shrink:0;
+}
+.req-badge.hit  { background:rgba(0,230,118,.12);color:var(--green);border:1px solid rgba(0,230,118,.3); }
+.req-badge.miss { background:rgba(255,109,53,.12);color:var(--orange);border:1px solid rgba(255,109,53,.3); }
+.req-url { color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.req-size{ color:var(--text2);flex-shrink:0; }
+.req-time{ color:var(--dim);flex-shrink:0; }
+
+/* ── Bandwidth ── */
+.bw-display {
+  text-align:center;padding:16px 0;
+}
+.bw-num {
+  font-size:2.6rem;font-weight:800;
+  background:linear-gradient(135deg,var(--green),var(--accent));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.bw-unit { font-family:'JetBrains Mono';font-size:.8rem;color:var(--text2);margin-top:4px; }
+.bw-sub  { font-family:'JetBrains Mono';font-size:.65rem;color:var(--text2);margin-top:8px; }
+
+/* ── No data state ── */
+.no-data {
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:120px;color:var(--text2);
+  font-family:'JetBrains Mono';font-size:.72rem;
+  gap:8px;
+}
+.no-data::before { content:'[ NO DATA ]';color:var(--dim); }
+
+/* ── Footer ── */
+.footer {
+  margin-top:20px;padding-top:14px;
+  border-top:1px solid var(--border);
+  display:flex;justify-content:space-between;align-items:center;
+}
+.footer p { font-family:'JetBrains Mono';font-size:.65rem;color:var(--text2); }
+.footer span { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="header">
+    <div class="header-left">
+      <div class="logo-mark">PC</div>
+      <div class="logo-text">
+        <h1>Proxy<span>Cache</span></h1>
+        <p>Live Monitor Dashboard</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-pill">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">CONNECTING</span>
+      </div>
+      <div id="last-update">Last update: —</div>
+    </div>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi" style="--kpi-color:var(--green)">
+      <div class="kpi-label">Cache Hits</div>
+      <div class="kpi-value" id="kpi-hits">0</div>
+      <div class="kpi-sub">Total served from cache</div>
+      <div class="kpi-icon">✓</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--orange)">
+      <div class="kpi-label">Cache Misses</div>
+      <div class="kpi-value" id="kpi-misses">0</div>
+      <div class="kpi-sub">Fetched from origin</div>
+      <div class="kpi-icon">✗</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--accent)">
+      <div class="kpi-label">Hit Ratio</div>
+      <div class="kpi-value" id="kpi-ratio">0%</div>
+      <div class="kpi-sub">Higher is better</div>
+      <div class="kpi-icon">◎</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--yellow)">
+      <div class="kpi-label">Evictions</div>
+      <div class="kpi-value" id="kpi-evictions">0</div>
+      <div class="kpi-sub">Entries removed</div>
+      <div class="kpi-icon">⟳</div>
+    </div>
+    <div class="kpi" style="--kpi-color:#a78bfa">
+      <div class="kpi-label">Active Conns</div>
+      <div class="kpi-value" id="kpi-conns">0</div>
+      <div class="kpi-sub">Current connections</div>
+      <div class="kpi-icon">⇌</div>
+    </div>
+    <div class="kpi" style="--kpi-color:var(--green)">
+      <div class="kpi-label">BW Saved</div>
+      <div class="kpi-value" id="kpi-bw">0B</div>
+      <div class="kpi-sub">Not re-downloaded</div>
+      <div class="kpi-icon">↓</div>
+    </div>
+  </div>
+
+  <div class="grid-main">
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Hit Ratio Gauge</div>
+        <div class="card-badge" id="policy-badge-label">HYBRID</div>
+      </div>
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 200 110">
+          <path class="gauge-track" d="M20,100 A80,80 0 0,1 180,100"/>
+          <path class="gauge-fill" id="gauge-arc"
+                d="M20,100 A80,80 0 0,1 180,100"
+                stroke="var(--accent)"
+                stroke-dasharray="251.2"
+                stroke-dashoffset="251.2"/>
+          <text class="gauge-num" id="gauge-text" x="100" y="92" text-anchor="middle">0%</text>
+          <text class="gauge-label" x="22"  y="115" text-anchor="middle">0%</text>
+          <text class="gauge-label" x="178" y="115" text-anchor="middle">100%</text>
+        </svg>
+        <div class="gauge-stats">
+          <div class="gs">
+            <div class="gs-val" style="color:var(--green)" id="g-hits">0</div>
+            <div class="gs-label">Hits</div>
+          </div>
+          <div class="gs">
+            <div class="gs-val" style="color:var(--orange)" id="g-misses">0</div>
+            <div class="gs-label">Misses</div>
+          </div>
+          <div class="gs">
+            <div class="gs-val" style="color:var(--yellow)" id="g-evictions">0</div>
+            <div class="gs-label">Evictions</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Hit / Miss Timeline</div>
+        <div class="card-badge">Live</div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="timeline-chart"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Cache Utilization</div>
+      </div>
+      <div class="fill-bar-wrap">
+        <div class="fill-section">
+          <div class="fill-info">
+            <span class="fill-label">Entries Used</span>
+            <span class="fill-val" id="fill-entries-val">0 / 500</span>
+          </div>
+          <div class="fill-track"><div class="fill-bar" id="fill-entries-bar"></div></div>
+        </div>
+        <div class="fill-section">
+          <div class="fill-info">
+            <span class="fill-label">Memory Used</span>
+            <span class="fill-val" id="fill-bytes-val">0 B / 50 MB</span>
+          </div>
+          <div class="fill-track"><div class="fill-bar" id="fill-bytes-bar"></div></div>
+        </div>
+        <div class="fill-section">
+          <div class="fill-info">
+            <span class="fill-label">Hit Rate Trend</span>
+            <span class="fill-val" id="fill-ratio-val">0%</span>
+          </div>
+          <div class="fill-track"><div class="fill-bar" id="fill-ratio-bar"></div></div>
+        </div>
+        <div class="bw-display" style="padding:8px 0">
+          <div class="bw-num" id="bw-num">0 B</div>
+          <div class="bw-unit">BANDWIDTH SAVED</div>
+          <div class="bw-sub" id="bw-sub">0 requests served from cache</div>
+        </div>
+      </div>
+    </div>
+
+  </div><div class="grid-bottom">
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Policy Benchmark (30 Requests)</div>
+        <div class="card-badge">Perfect Storm Test</div>
+      </div>
+      <div class="compare-wrap">
+        <canvas id="compare-chart"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Recent Requests</div>
+        <div class="card-badge" id="req-count-badge">0 total</div>
+      </div>
+      <div class="req-log" id="req-log">
+        <div class="no-data">Waiting for requests...</div>
+      </div>
+    </div>
+
+  </div><div class="footer">
+    <p>ProxyCache Dashboard &mdash; Auto-refresh every <span>3s</span></p>
+    <p>CN Mini Project &mdash; <span>Hybrid Architecture</span></p>
+  </div>
+
+</div><script>
+// ════════════════════════════════════════════
+//  CHART SETUP
+// ════════════════════════════════════════════
+
+Chart.defaults.color = '#4a7090';
+Chart.defaults.borderColor = '#0f2035';
+Chart.defaults.font.family = "'JetBrains Mono', monospace";
+Chart.defaults.font.size   = 10;
+
+// timeline
+const tlCtx = document.getElementById('timeline-chart').getContext('2d');
+const timelineChart = new Chart(tlCtx, {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      {
+        label: 'Hits',
+        data: [],
+        borderColor: '#00e676',
+        backgroundColor: 'rgba(0,230,118,.08)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#00e676',
+        fill: true,
+        tension: 0.4,
+      },
+      {
+        label: 'Misses',
+        data: [],
+        borderColor: '#ff6d35',
+        backgroundColor: 'rgba(255,109,53,.08)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#ff6d35',
+        fill: true,
+        tension: 0.4,
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    animation: { duration: 600 },
+    plugins: {
+      legend: { labels: { boxWidth: 10, padding: 12, color:'#4a7090' } }
+    },
+    scales: {
+      x: { grid:{ color:'#0a1a2a' }, ticks:{ maxRotation:0, maxTicksLimit:6 } },
+      y: { grid:{ color:'#0a1a2a' }, beginAtZero:true, ticks:{ precision:0 } }
+    }
+  }
+});
+
+// LRU vs LFU vs Hybrid comparison
+const cmpCtx = document.getElementById('compare-chart').getContext('2d');
+const compareChart = new Chart(cmpCtx, {
+  type: 'bar',
+  data: {
+    labels: ['Hit Ratio %', 'Hits', 'Misses', 'Evictions'],
+    datasets: [
+      {
+        label: 'LRU',
+        data: [60.0, 18, 12, 8],
+        backgroundColor: 'rgba(0,200,255,.3)',
+        borderColor: '#00c8ff',
+        borderWidth: 2,
+      },
+      {
+        label: 'LFU',
+        data: [53.3, 16, 14, 10],
+        backgroundColor: 'rgba(255,201,64,.3)',
+        borderColor: '#ffc940',
+        borderWidth: 2,
+      },
+      {
+        label: 'HYBRID',
+        data: [66.6, 20, 10, 12],
+        backgroundColor: 'rgba(0,230,118,.3)',
+        borderColor: '#00e676',
+        borderWidth: 2,
+      }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    animation: { duration: 800 },
+    plugins: {
+      legend: { labels:{ boxWidth:10, padding:12, color:'#4a7090' } }
+    },
+    scales: {
+      x: { grid:{ color:'#0a1a2a' } },
+      y: { grid:{ color:'#0a1a2a' }, beginAtZero:true }
+    }
+  }
+});
+
+// ════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════
+let prevHits   = 0;
+let prevMisses = 0;
+const tlHistory   = [];  // [{time, hits, misses}]
+const MAX_TL      = 20;
+
+// ════════════════════════════════════════════
+//  FETCH stats.json
+// ════════════════════════════════════════════
+async function fetchStats() {
+  try {
+    const res  = await fetch('stats.json?t=' + Date.now());
+    if (!res.ok) throw new Error('not found');
+    const data = await res.json();
+    updateDashboard(data);
+    setStatus(true);
+  } catch(e) {
+    setStatus(false);
+    // show demo data specifically tuned to the Hybrid benchmark if no backend
+    updateDashboard(getDemoData());
+  }
+}
+
+function setStatus(online) {
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  if (online) {
+    dot.classList.remove('offline');
+    text.textContent = 'LIVE';
+  } else {
+    dot.classList.add('offline');
+    text.textContent = 'BENCHMARK RESULTS (DEMO)';
+  }
+  document.getElementById('last-update').textContent =
+    'Last update: ' + new Date().toLocaleTimeString();
+}
+
+// ════════════════════════════════════════════
+//  DEMO DATA (Shows the actual project results)
+// ════════════════════════════════════════════
+let demoTick = 0;
+function getDemoData() {
+  demoTick++;
+  // We simulate the flow of the 30-request benchmark for the Hybrid Cache
+  const hits      = Math.min(20, Math.floor(demoTick * 1.5));
+  const misses    = Math.min(10, Math.floor(demoTick * 0.8));
+  const evictions = Math.min(12, Math.floor(demoTick * 0.9));
+  
+  return {
+    hits, misses, evictions,
+    active_connections: Math.floor(Math.random()*2),
+    bytes_saved: hits * 8400,
+    total_bytes_served: (hits+misses) * 12000,
+    cache_entries: Math.min(hits, 4),
+    cache_bytes: Math.min(hits * 8400, 50*1024*1024),
+    max_entries: 4,
+    max_bytes:   50*1024*1024,
+    policy: 'HYBRID',
+    recent_requests: generateDemoRequests(hits, misses)
+  };
+}
+
+const DEMO_URLS = [
+  'http://example.com/?q=vip1',
+  'http://example.com/?q=vip2',
+  'http://example.com/?q=junk1',
+  'http://example.com/?q=bot1',
+  'http://example.com/?q=trend1',
+];
+let demoReqs = [];
+function generateDemoRequests(hits, misses) {
+  const newHits   = hits   - prevHits;
+  const newMisses = misses - prevMisses;
+  for (let i=0;i<newHits;i++) {
+    demoReqs.unshift({
+      url: DEMO_URLS[Math.floor(Math.random()*DEMO_URLS.length)],
+      hit: true,
+      size: Math.floor(Math.random()*5000+500),
+      time: new Date().toLocaleTimeString()
+    });
+  }
+  for (let i=0;i<newMisses;i++) {
+    demoReqs.unshift({
+      url: DEMO_URLS[Math.floor(Math.random()*DEMO_URLS.length)],
+      hit: false,
+      size: Math.floor(Math.random()*8000+1000),
+      time: new Date().toLocaleTimeString()
+    });
+  }
+  return demoReqs.slice(0,15);
+}
+
+// ════════════════════════════════════════════
+//  UPDATE DASHBOARD
+// ════════════════════════════════════════════
+function updateDashboard(d) {
+  const hits      = d.hits      || 0;
+  const misses    = d.misses    || 0;
+  const evictions = d.evictions || 0;
+  const total     = hits + misses;
+  const ratio     = total > 0 ? (hits/total*100) : 0;
+  const bwSaved   = d.bytes_saved || 0;
+  const entries   = d.cache_entries || 0;
+  const cacheBytes= d.cache_bytes   || 0;
+  const maxEnt    = d.max_entries   || 4;
+  const maxBytes  = d.max_bytes     || (50*1024*1024);
+  const policy    = d.policy        || 'HYBRID';
+  const conns     = d.active_connections || 0;
+
+  // ── KPIs ──
+  animateNum('kpi-hits',      hits);
+  animateNum('kpi-misses',    misses);
+  document.getElementById('kpi-ratio').textContent     = ratio.toFixed(1)+'%';
+  animateNum('kpi-evictions', evictions);
+  document.getElementById('kpi-conns').textContent     = conns;
+  document.getElementById('kpi-bw').textContent        = fmtBytes(bwSaved);
+
+  // ── Gauge ──
+  updateGauge(ratio, hits, misses, evictions);
+
+  // ── Policy badge ──
+  const pb = document.getElementById('policy-badge-label');
+  pb.textContent = policy;
+  
+  let badgeClass = 'card-badge';
+  if (policy === 'LFU') badgeClass += ' lfu';
+  if (policy === 'HYBRID') badgeClass += ' hybrid';
+  pb.className = badgeClass;
+
+  // ── Timeline ──
+  const now = new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  tlHistory.push({ time:now, hits, misses });
+  if (tlHistory.length > MAX_TL) tlHistory.shift();
+
+  timelineChart.data.labels   = tlHistory.map(x=>x.time);
+  timelineChart.data.datasets[0].data = tlHistory.map(x=>x.hits);
+  timelineChart.data.datasets[1].data = tlHistory.map(x=>x.misses);
+  timelineChart.update('none');
+
+  // ── Fill bars ──
+  const entPct  = Math.min(entries/maxEnt*100, 100);
+  const bwPct   = Math.min(cacheBytes/maxBytes*100, 100);
+  const ratioPct= ratio;
+
+  setFillBar('fill-entries-bar', 'fill-entries-val', entPct,
+    `${entries} / ${maxEnt}`);
+  setFillBar('fill-bytes-bar',   'fill-bytes-val',   bwPct,
+    `${fmtBytes(cacheBytes)} / ${fmtBytes(maxBytes)}`);
+  setFillBar('fill-ratio-bar',   'fill-ratio-val',   ratioPct,
+    ratio.toFixed(1)+'%');
+
+  // ── Bandwidth ──
+  document.getElementById('bw-num').textContent = fmtBytes(bwSaved);
+  document.getElementById('bw-sub').textContent = `${hits} requests served from cache`;
+
+  // ── Recent Requests ──
+  updateReqLog(d.recent_requests || [], total);
+
+  prevHits   = hits;
+  prevMisses = misses;
+}
+
+function setFillBar(barId, valId, pct, label) {
+  const bar = document.getElementById(barId);
+  const val = document.getElementById(valId);
+  bar.style.width = pct+'%';
+  bar.className   = 'fill-bar' + (pct>90?' full': pct>70?' warn':'');
+  if (val) val.textContent = label;
+}
+
+function updateGauge(ratio, hits, misses, evictions) {
+  const arc      = document.getElementById('gauge-arc');
+  const total    = 251.2;
+  const offset   = total - (ratio/100)*total;
+  arc.style.strokeDashoffset = offset;
+
+  // color by ratio
+  const color = ratio > 65 ? '#00e676' : ratio > 40 ? '#ffc940' : '#ff4757';
+  arc.style.stroke = color;
+
+  const gt = document.getElementById('gauge-text');
+  gt.textContent  = ratio.toFixed(1)+'%';
+  gt.style.fill   = color;
+
+  document.getElementById('g-hits').textContent      = hits;
+  document.getElementById('g-misses').textContent    = misses;
+  document.getElementById('g-evictions').textContent = evictions;
+}
+
+function updateReqLog(reqs, total) {
+  document.getElementById('req-count-badge').textContent = total+' total';
+  const log = document.getElementById('req-log');
+
+  if (!reqs || reqs.length===0) {
+    log.innerHTML = '<div class="no-data">Waiting for requests...</div>';
+    return;
+  }
+
+  log.innerHTML = reqs.slice(0,15).map(r => {
+    const shortUrl = r.url.replace('http://','').replace('https://','');
+    return `<div class="req-item">
+      <span class="req-badge ${r.hit?'hit':'miss'}">${r.hit?'HIT':'MISS'}</span>
+      <span class="req-url" title="${r.url}">${shortUrl}</span>
+      <span class="req-size">${fmtBytes(r.size||0)}</span>
+      <span class="req-time">${r.time||''}</span>
+    </div>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════
+//  UTILITIES
+// ════════════════════════════════════════════
+function fmtBytes(b) {
+  if (b >= 1024*1024*1024) return (b/1024/1024/1024).toFixed(2)+' GB';
+  if (b >= 1024*1024)      return (b/1024/1024).toFixed(2)+' MB';
+  if (b >= 1024)           return (b/1024).toFixed(1)+' KB';
+  return b+' B';
+}
+
+function animateNum(id, target) {
+  const el  = document.getElementById(id);
+  const cur = parseInt(el.textContent)||0;
+  if (cur===target) return;
+  const diff  = target-cur;
+  const steps = 12;
+  let   i     = 0;
+  const t = setInterval(()=>{
+    i++;
+    el.textContent = Math.round(cur + diff*(i/steps));
+    if (i>=steps) { el.textContent=target; clearInterval(t); }
+  }, 30);
+}
+
+// ════════════════════════════════════════════
+//  INIT + POLLING
+// ════════════════════════════════════════════
+fetchStats();
+setInterval(fetchStats, 3000);
+</script>
+</body>
+</html>
+========== File: ./compare.sh ==========
+
+#!/bin/bash
+
+echo "⚙️  Recompiling project with Cache Size = 4..."
+make clean > /dev/null 2>&1 && make > /dev/null 2>&1
+
+echo "🧪 Starting The Pure Bash Benchmark..."
+
+for policy in lru lfu hybrid; do
+    POLICY_UPPER=$(echo "$policy" | tr '[:lower:]' '[:upper:]')
+    echo -e "\n=================================================="
+    echo "🚀 RUNNING TEST: $POLICY_UPPER CACHE"
+    echo "=================================================="
+    
+    # 1. Clear ports and start proxy
+    killall -9 proxy_cache > /dev/null 2>&1
+    sleep 2 
+    
+    # Note: Starting WITHOUT the -v flag so logs don't bury the table
+    ./proxy_cache -p 8080 -P $policy > result_${policy}.txt 2>&1 &
+    PROXY_PID=$!
+    sleep 2 
+
+    echo "  -> Running 30 deterministic network requests..."
+    
+    # Helper function: strictly fetch without following redirects
+    fetch() {
+        curl -s -m 2 -x http://127.0.0.1:8080 "http://example.com/?q=$1" > /dev/null
+    }
+
+    # Phase 1: VIP (10 requests) - Hybrid promotes to LFU
+    for i in {1..5}; do fetch "vip1"; fetch "vip2"; done
+    # Phase 2: Junk (8 requests) - Pollutes standard LFU
+    for i in {1..4}; do fetch "junk1"; fetch "junk2"; done
+    # Phase 3: Bots (4 requests) - Flushes standard LRU
+    for i in {1..4}; do fetch "bot$i"; done
+    # Phase 4: Trends (4 requests) - Ignored by standard LFU
+    for i in {1..2}; do fetch "trend1"; fetch "trend2"; done
+    # Phase 5: Final Exam (4 requests)
+    fetch "vip1"; fetch "vip2"; fetch "trend1"; fetch "trend2"
+    
+    # Wait 10 seconds to ensure the proxy's 5-second print timer fires twice
+    echo "⏳ Traffic complete! Waiting for final stats sync..."
+    sleep 10 
+
+    echo "📊 FINAL RESULTS FOR $POLICY_UPPER:"
+    # Grab the table reliably without chopping the bottom off
+    grep -A 12 "+---------------------- CACHE STATS" result_${policy}.txt | tail -n 13
+
+    # Clean shutdown
+    kill -9 $PROXY_PID > /dev/null 2>&1
+    wait $PROXY_PID 2>/dev/null
+done
+
+echo -e "\n✅ Comparison Complete!"
+========== File: ./README.md ==========
+
+# HTTP Proxy Cache Server — C++
+
+A **multi-threaded HTTP proxy cache server** built in C++17.  
+Supports **LRU** and **LFU** eviction policies, TTL-based expiration, domain blacklisting, and live stats.
+
+---
+
+## Project Structure
+
+```
+proxy_cache/
+├── include/
+│   ├── cache.h       — LRUCache, LFUCache, CacheEntry, CacheStats
+│   ├── proxy.h       — ProxyServer, HttpRequest, ProxyConfig
+│   └── logger.h      — Logger, StatsDisplay
+├── src/
+│   ├── cache.cpp     — LRU + LFU implementations
+│   ├── proxy.cpp     — Proxy server, HTTP parsing, socket I/O
+│   ├── logger.cpp    — Thread-safe logger + stats display
+│   └── main.cpp      — CLI entry point
+├── scripts/
+│   └── bench.py      — Python benchmark script
+└── Makefile
+```
+
+---
+
+## Build
+
+```bash
+make          # release build
+make debug    # debug build with symbols
+make clean    # remove binary and log
+```
+
+Requires: **g++ (C++17)**, **pthreads**, Linux/macOS
+
+---
+
+## Run
+
+```bash
+# Basic — LRU, port 8080
+./proxy_cache -p 8080 -P lru -v
+
+# LFU, 100MB cache, 10 min TTL
+./proxy_cache -p 8080 -P lfu -m 100 -t 600
+
+# With domain blacklist
+./proxy_cache -p 8080 -b ads.example.com -b tracker.io -v
+```
+
+### All Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-p <port>` | Port to listen on | 8080 |
+| `-e <N>` | Max cached entries | 500 |
+| `-m <MB>` | Max cache size in MB | 50 |
+| `-t <sec>` | Default TTL (seconds) | 300 |
+| `-P lru\|lfu` | Eviction policy | lru |
+| `-b <domain>` | Blacklist domain (repeatable) | — |
+| `-v` | Verbose/debug logging | off |
+
+---
+
+## Configure Browser / curl
+
+Point your HTTP proxy to `localhost:8080`:
+
+```bash
+# curl
+curl -x http://localhost:8080 http://example.com/
+
+# wget
+wget -e use_proxy=yes -e http_proxy=localhost:8080 http://example.com/
+```
+
+For browser: set HTTP proxy to `127.0.0.1` port `8080` in network settings.
+
+---
+
+## Benchmark
+
+```bash
+# Start proxy first, then in another terminal:
+python3 scripts/bench.py --proxy localhost:8080 --rounds 5
+```
+
+---
+
+## CN Concepts Demonstrated
+
+| Concept | Where |
+|---------|-------|
+| TCP Socket Programming | `proxy.cpp` — `create_server_socket`, `connect_to_host` |
+| HTTP/1.x Parsing | `proxy.cpp` — `parse_request` |
+| Proxy Architecture | `proxy.cpp` — `handle_client`, `fetch_from_origin` |
+| LRU Eviction | `cache.cpp` — `LRUCache` |
+| LFU Eviction | `cache.cpp` — `LFUCache` |
+| TTL / Cache Expiry | `cache.h` — `CacheEntry::is_expired()` |
+| Multi-threading (pthreads) | `proxy.cpp` — `thread_entry`, `pthread_create` |
+| Mutex Synchronization | `cache.cpp` — `std::mutex` in LRU/LFU |
+| Cache-Control Headers | `proxy.cpp` — `parse_ttl_from_headers` |
+| Bandwidth Tracking | `cache.h` — `CacheStats::bytes_saved` |
+
+---
+
+## Team Division
+
+| Member | Files |
+|--------|-------|
+| 1 — Socket + HTTP | `proxy.cpp`, `proxy.h` |
+| 2 — LRU Cache | `cache.cpp` (LRU part), `cache.h` |
+| 3 — LFU + Threading | `cache.cpp` (LFU part), `main.cpp` |
+| 4 — Logger + Bench | `logger.cpp`, `bench.py`, `README` |
+
+========== File: ./.gitignore ==========
+
+��p r o x y _ c a c h e 
+ p r o x y . l o g 
+ * . o 
+ * . o u t 
+  
+ p r o x y _ c a c h e . e x e  
+ s t a t s . j s o n  
+ 
+========== File: ./scripts/smart_bench.py ==========
+
+import urllib.request
+
+proxy = urllib.request.ProxyHandler({'http': '127.0.0.1:8080'})
+opener = urllib.request.build_opener(proxy)
+
+def fetch(url):
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        # Added timeout=2 so the script NEVER freezes
+        opener.open(req, timeout=2).read()
+    except Exception:
+        pass
+
+print("  -> Phase 1: VIP Websites (Freq 5)")
+vips = ["http://example.com/?q=vip1", "http://example.com/?q=vip2"]
+for _ in range(5):
+    for u in vips: fetch(u)
+
+print("  -> Phase 2: Old Junk (Freq 4)")
+junk = ["http://example.com/?q=junk1", "http://example.com/?q=junk2"]
+for _ in range(4):
+    for u in junk: fetch(u)
+
+print("  -> Phase 3: Bot Attack (Freq 1)")
+for i in range(4):
+    fetch(f"http://example.com/?q=bot{i}")
+
+print("  -> Phase 4: New Trends (Freq 2)")
+trends = ["http://example.com/?q=trend1", "http://example.com/?q=trend2"]
+for _ in range(2):
+    for u in trends: fetch(u)
+
+print("  -> Phase 5: THE FINAL EXAM (Fetch VIPs + Trends)")
+final_test = vips + trends
+for u in final_test: fetch(u)
+
+print("  -> Python Script Finished! Handing back to Bash...")
+========== File: ./scripts/mock_server.py ==========
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class MockHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.send_header("Cache-Control", "max-age=3600") # Force proxy to cache
+        self.end_headers()
+        self.wfile.write(b"Perfect Lab Data")
+        
+    def log_message(self, format, *args):
+        pass # Keep the terminal quiet
+
+print("🌐 Fake Internet running on port 9090...")
+HTTPServer(('127.0.0.1', 9090), MockHandler).serve_forever()
+========== File: ./scripts/bench.py ==========
+
+#!/usr/bin/env python3
+"""
+bench.py — Benchmark script for HTTP Proxy Cache
+Tests cache hit ratio and latency improvement.
+
+Usage:
+    python3 bench.py [--proxy localhost:8080] [--rounds 5]
+"""
+
+import urllib.request
+import time
+import argparse
+import statistics
+import sys
+
+# URLs to benchmark (HTTP only for basic proxy)
+TEST_URLS = [
+    "http://example.com/",
+    "http://httpbin.org/get",
+    "http://httpbin.org/headers",
+    "http://info.cern.ch/",
+    "http://neverssl.com/",
+]
+
+def fetch_via_proxy(url: str, proxy_addr: str) -> tuple[float, int]:
+    """Return (latency_ms, bytes_received)"""
+    proxy_handler = urllib.request.ProxyHandler({"http": f"http://{proxy_addr}"})
+    opener = urllib.request.build_opener(proxy_handler)
+    start = time.perf_counter()
+    try:
+        with opener.open(url, timeout=10) as resp:
+            data = resp.read()
+        elapsed = (time.perf_counter() - start) * 1000
+        return elapsed, len(data)
+    except Exception as e:
+        print(f"  [ERROR] {url}: {e}")
+        return -1, 0
+
+def run_benchmark(proxy_addr: str, rounds: int):
+    print(f"\n{'='*60}")
+    print(f"  HTTP Proxy Cache Benchmark")
+    print(f"  Proxy: {proxy_addr} | Rounds: {rounds}")
+    print(f"{'='*60}\n")
+
+    results = {}
+
+    for url in TEST_URLS:
+        print(f"Testing: {url}")
+        latencies_cold = []
+        latencies_warm = []
+
+        for r in range(rounds):
+            # First request — likely a cache miss
+            lat, sz = fetch_via_proxy(url, proxy_addr)
+            if lat > 0:
+                latencies_cold.append(lat)
+                print(f"  Round {r+1} cold: {lat:.1f} ms  ({sz} bytes)")
+
+            # Second request immediately — should be a cache hit
+            lat2, sz2 = fetch_via_proxy(url, proxy_addr)
+            if lat2 > 0:
+                latencies_warm.append(lat2)
+                print(f"  Round {r+1} warm: {lat2:.1f} ms  (cache hit expected)")
+
+        results[url] = {
+            "cold_avg": statistics.mean(latencies_cold) if latencies_cold else 0,
+            "warm_avg": statistics.mean(latencies_warm) if latencies_warm else 0,
+        }
+        print()
+
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"  RESULTS SUMMARY")
+    print(f"{'='*60}")
+    print(f"{'URL':<40} {'Cold (ms)':>10} {'Warm (ms)':>10} {'Speedup':>10}")
+    print(f"{'-'*70}")
+
+    total_cold = []
+    total_warm = []
+    for url, r in results.items():
+        short_url = url[:38] + ".." if len(url) > 40 else url
+        speedup = (r["cold_avg"] / r["warm_avg"]) if r["warm_avg"] > 0 else float("inf")
+        print(f"{short_url:<40} {r['cold_avg']:>10.1f} {r['warm_avg']:>10.1f} {speedup:>9.1f}x")
+        if r["cold_avg"] > 0: total_cold.append(r["cold_avg"])
+        if r["warm_avg"] > 0: total_warm.append(r["warm_avg"])
+
+    print(f"{'-'*70}")
+    if total_cold and total_warm:
+        avg_cold    = statistics.mean(total_cold)
+        avg_warm    = statistics.mean(total_warm)
+        avg_speedup = avg_cold / avg_warm if avg_warm else 0
+        saved_pct   = (1 - avg_warm / avg_cold) * 100 if avg_cold else 0
+        print(f"{'AVERAGE':<40} {avg_cold:>10.1f} {avg_warm:>10.1f} {avg_speedup:>9.1f}x")
+        print(f"\n  ✅ Cache reduced latency by {saved_pct:.1f}% on average")
+    print(f"{'='*60}\n")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Proxy Cache Benchmark")
+    parser.add_argument("--proxy",  default="localhost:8080", help="Proxy address (host:port)")
+    parser.add_argument("--rounds", type=int, default=3, help="Number of rounds per URL")
+    args = parser.parse_args()
+    run_benchmark(args.proxy, args.rounds)
+
+========== File: ./network_routing_simulator.html ==========
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Routing Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #050a0f;
+    --panel:     #0a1520;
+    --border:    #0d2137;
+    --accent:    #00d4ff;
+    --accent2:   #ff6b35;
+    --green:     #00ff88;
+    --yellow:    #ffd700;
+    --text:      #c8e0f0;
+    --dim:       #3a5a70;
+    --node-def:  #0d2137;
+    --node-vis:  #003d5c;
+    --node-done: #00443a;
+    --edge-def:  #0d2137;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Exo 2', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* grid background */
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background-image:
+      linear-gradient(rgba(0,212,255,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events:none;
+    z-index:0;
+  }
+
+  .wrapper { position:relative; z-index:1; display:flex; flex-direction:column; height:100vh; }
+
+  /* ── Header ── */
+  header {
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items:center; justify-content:space-between;
+    background: rgba(10,21,32,.9);
+    backdrop-filter: blur(10px);
+  }
+  .logo {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 1.1rem;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--accent2); }
+  .algo-tabs { display:flex; gap:8px; }
+  .algo-btn {
+    padding: 6px 18px;
+    border: 1px solid var(--dim);
+    background: transparent;
+    color: var(--dim);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: .8rem;
+    letter-spacing:1px;
+    cursor:pointer;
+    transition: all .2s;
+    text-transform: uppercase;
+  }
+  .algo-btn.active, .algo-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,212,255,.08);
+    box-shadow: 0 0 12px rgba(0,212,255,.2);
+  }
+
+  /* ── Main Layout ── */
+  .main { display:flex; flex:1; overflow:hidden; }
+
+  /* ── Left Panel ── */
+  .left-panel {
+    width: 260px;
+    min-width: 260px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction:column;
+    overflow-y: auto;
+  }
+  .panel-section { padding:16px; border-bottom:1px solid var(--border); }
+  .panel-title {
+    font-family:'Share Tech Mono', monospace;
+    font-size:.7rem;
+    letter-spacing:2px;
+    color: var(--accent);
+    text-transform:uppercase;
+    margin-bottom:12px;
+  }
+
+  .control-row { display:flex; gap:8px; margin-bottom:8px; align-items:center; }
+  .control-row label { font-size:.75rem; color:var(--dim); width:60px; flex-shrink:0; }
+
+  input[type=number], select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 8px;
+    font-family:'Share Tech Mono', monospace;
+    font-size:.8rem;
+    flex:1;
+    outline:none;
+    transition: border-color .2s;
+  }
+  input[type=number]:focus, select:focus { border-color:var(--accent); }
+
+  .btn {
+    width:100%; padding:9px;
+    border:1px solid var(--accent);
+    background: rgba(0,212,255,.08);
+    color: var(--accent);
+    font-family:'Share Tech Mono', monospace;
+    font-size:.8rem;
+    letter-spacing:1px;
+    text-transform:uppercase;
+    cursor:pointer;
+    transition: all .2s;
+    margin-bottom:6px;
+  }
+  .btn:hover { background:rgba(0,212,255,.18); box-shadow:0 0 16px rgba(0,212,255,.25); }
+  .btn.danger { border-color:var(--accent2); color:var(--accent2); background:rgba(255,107,53,.08); }
+  .btn.danger:hover { background:rgba(255,107,53,.18); }
+  .btn.go { border-color:var(--green); color:var(--green); background:rgba(0,255,136,.08); }
+  .btn.go:hover { background:rgba(0,255,136,.18); box-shadow:0 0 16px rgba(0,255,136,.25); }
+  .btn:disabled { opacity:.35; cursor:not-allowed; }
+
+  .speed-row { display:flex; align-items:center; gap:8px; margin-top:4px; }
+  .speed-row label { font-size:.72rem; color:var(--dim); }
+  input[type=range] {
+    flex:1; accent-color:var(--accent);
+    cursor:pointer;
+  }
+  .speed-val { font-family:'Share Tech Mono'; font-size:.75rem; color:var(--accent); width:40px; text-align:right; }
+
+  /* legend */
+  .legend { display:flex; flex-direction:column; gap:6px; }
+  .leg-item { display:flex; align-items:center; gap:8px; font-size:.73rem; color:var(--dim); }
+  .leg-dot { width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+
+  /* dist table */
+  #dist-table { width:100%; border-collapse:collapse; font-size:.76rem; }
+  #dist-table th {
+    font-family:'Share Tech Mono'; font-size:.65rem; letter-spacing:1px;
+    color:var(--accent); text-align:left; padding:4px 6px;
+    border-bottom:1px solid var(--border);
+  }
+  #dist-table td { padding:4px 6px; border-bottom:1px solid rgba(13,33,55,.5); }
+  #dist-table tr.highlight td { color:var(--green); }
+  #dist-table tr.path-row td { color:var(--yellow); }
+
+  /* ── Canvas Area ── */
+  .canvas-wrap {
+    flex:1; position:relative; overflow:hidden;
+    background: radial-gradient(ellipse at 50% 50%, #071220 0%, var(--bg) 70%);
+  }
+  canvas { display:block; width:100%; height:100%; }
+
+  /* tooltip */
+  #tooltip {
+    position:absolute; pointer-events:none;
+    background:rgba(10,21,32,.95); border:1px solid var(--accent);
+    padding:6px 10px; font-size:.75rem;
+    font-family:'Share Tech Mono'; color:var(--accent);
+    display:none; z-index:10;
+    box-shadow: 0 0 16px rgba(0,212,255,.3);
+  }
+
+  /* ── Right Panel — Log ── */
+  .right-panel {
+    width: 240px; min-width:240px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display:flex; flex-direction:column;
+    overflow:hidden;
+  }
+  .log-header {
+    padding:12px 16px; border-bottom:1px solid var(--border);
+    font-family:'Share Tech Mono'; font-size:.7rem;
+    letter-spacing:2px; color:var(--accent); text-transform:uppercase;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  #log {
+    flex:1; overflow-y:auto; padding:10px;
+    font-family:'Share Tech Mono'; font-size:.7rem;
+    line-height:1.7;
+  }
+  #log::-webkit-scrollbar { width:4px; }
+  #log::-webkit-scrollbar-track { background:var(--bg); }
+  #log::-webkit-scrollbar-thumb { background:var(--dim); }
+
+  .log-entry { margin-bottom:2px; }
+  .log-entry.step  { color: var(--text); }
+  .log-entry.visit { color: var(--accent); }
+  .log-entry.relax { color: var(--yellow); }
+  .log-entry.done  { color: var(--green); }
+  .log-entry.info  { color: var(--dim); }
+  .log-entry.path  { color: var(--accent2); }
+
+  /* status bar */
+  .statusbar {
+    padding:6px 16px; border-top:1px solid var(--border);
+    font-family:'Share Tech Mono'; font-size:.68rem;
+    color:var(--dim); display:flex; gap:16px;
+  }
+  .statusbar span { color:var(--accent); }
+
+  /* mode hint */
+  .mode-hint {
+    position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    font-family:'Share Tech Mono'; font-size:.7rem; color:var(--dim);
+    background:rgba(10,21,32,.8); padding:5px 14px; border:1px solid var(--border);
+    pointer-events:none;
+  }
+
+  /* ── Responsive ── */
+  @media(max-width:800px){
+    .left-panel, .right-panel { display:none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- HEADER -->
+<header>
+  <div class="logo">NET<span>ROUTE</span> // Simulator</div>
+  <div class="algo-tabs">
+    <button class="algo-btn active" id="btn-dijkstra" onclick="setAlgo('dijkstra')">Dijkstra</button>
+    <button class="algo-btn" id="btn-bellman" onclick="setAlgo('bellman')">Bellman-Ford</button>
+  </div>
+  <div style="font-family:'Share Tech Mono';font-size:.7rem;color:var(--dim)">
+    CN Mini Project &mdash; Web Routing Sim
+  </div>
+</header>
+
+<div class="main">
+
+<!-- LEFT PANEL -->
+<div class="left-panel">
+
+  <div class="panel-section">
+    <div class="panel-title">Graph Setup</div>
+    <div class="control-row">
+      <label>Nodes</label>
+      <input type="number" id="node-count" value="7" min="3" max="12">
+    </div>
+    <button class="btn" onclick="generateRandom()">Generate Random Graph</button>
+    <button class="btn danger" onclick="clearGraph()">Clear Graph</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Add Edge</div>
+    <div class="control-row">
+      <label>From</label>
+      <select id="edge-from"></select>
+    </div>
+    <div class="control-row">
+      <label>To</label>
+      <select id="edge-to"></select>
+    </div>
+    <div class="control-row">
+      <label>Weight</label>
+      <input type="number" id="edge-weight" value="5" min="1" max="99">
+    </div>
+    <button class="btn" onclick="addEdgeManual()">Add Edge</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Simulation</div>
+    <div class="control-row">
+      <label>Source</label>
+      <select id="src-node"></select>
+    </div>
+    <div class="control-row">
+      <label>Target</label>
+      <select id="tgt-node"></select>
+    </div>
+    <div class="speed-row">
+      <label>Speed</label>
+      <input type="range" id="speed" min="100" max="2000" value="700" oninput="updateSpeed()">
+      <span class="speed-val" id="speed-label">700ms</span>
+    </div>
+    <button class="btn go" id="run-btn" onclick="runAlgo()">▶ Run Algorithm</button>
+    <button class="btn" onclick="stepAlgo()" id="step-btn">⏭ Step</button>
+    <button class="btn danger" onclick="resetViz()">↺ Reset</button>
+  </div>
+
+  <div class="panel-section">
+    <div class="panel-title">Legend</div>
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#1a4060;border:2px solid #0d2137"></div>Unvisited Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#00d4ff;box-shadow:0 0 8px #00d4ff"></div>Current Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#00443a;border:2px solid #00ff88"></div>Visited Node</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ff6b35;border-radius:0"></div>Shortest Path</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#ffd700;border-radius:0"></div>Relaxed Edge</div>
+    </div>
+  </div>
+
+  <div class="panel-section" style="flex:1">
+    <div class="panel-title">Distance Table</div>
+    <table id="dist-table">
+      <thead><tr><th>Node</th><th>Dist</th><th>Via</th></tr></thead>
+      <tbody id="dist-tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<!-- CANVAS -->
+<div class="canvas-wrap" id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="tooltip"></div>
+  <div class="mode-hint" id="mode-hint">Click canvas to add node &bull; Click two nodes to add edge</div>
+</div>
+
+<!-- RIGHT PANEL — LOG -->
+<div class="right-panel">
+  <div class="log-header">
+    Algorithm Log
+    <button style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:.8rem" onclick="clearLog()">CLR</button>
+  </div>
+  <div id="log"></div>
+  <div class="statusbar">
+    Step: <span id="stat-step">0</span>
+    &nbsp;|&nbsp; Visited: <span id="stat-visited">0</span>
+  </div>
+</div>
+
+</div><!-- main -->
+</div><!-- wrapper -->
+
+<div id="tooltip"></div>
+
+<script>
+// ════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const wrap   = document.getElementById('canvas-wrap');
+
+let nodes = [];       // {id, x, y, label}
+let edges = [];       // {from, to, weight}
+let algo  = 'dijkstra';
+
+// interaction
+let clickFirst = null;   // first node clicked for edge
+let isDragging = false;
+let dragNode   = null;
+let dragOffX   = 0, dragOffY = 0;
+
+// simulation
+let simSteps   = [];
+let simIndex   = 0;
+let simTimer   = null;
+let simRunning = false;
+let simSpeed   = 700;
+
+// vis state
+let nodeState  = {};   // id -> 'unvisited'|'current'|'visited'
+let edgeState  = {};   // "f-t" -> 'default'|'relaxed'|'path'
+let dist       = {};
+let prev       = {};
+
+const NODE_R   = 22;
+const COLORS = {
+  nodeBg:      '#0d2137',
+  nodeBorder:  '#0d3355',
+  nodeVisited: '#00443a',
+  nodeCurrent: '#003d5c',
+  nodeText:    '#c8e0f0',
+  edgeDef:     '#0d2855',
+  edgeRelaxed: '#ffd700',
+  edgePath:    '#ff6b35',
+  edgeCurrent: '#00d4ff',
+  accent:      '#00d4ff',
+  green:       '#00ff88',
+  orange:      '#ff6b35',
+};
+
+// ════════════════════════════════════════════
+//  CANVAS RESIZE
+// ════════════════════════════════════════════
+function resizeCanvas() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  draw();
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ════════════════════════════════════════════
+//  DRAW
+// ════════════════════════════════════════════
+function draw() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // edges
+  for (const e of edges) {
+    const a = nodes.find(n=>n.id===e.from);
+    const b = nodes.find(n=>n.id===e.to);
+    if (!a||!b) continue;
+    const key1 = `${e.from}-${e.to}`;
+    const key2 = `${e.to}-${e.from}`;
+    const st   = edgeState[key1] || edgeState[key2] || 'default';
+    drawEdge(a,b,e.weight,st);
+  }
+
+  // nodes
+  for (const n of nodes) {
+    const st = nodeState[n.id] || 'unvisited';
+    drawNode(n, st);
+  }
+
+  // highlight first clicked
+  if (clickFirst !== null) {
+    const n = nodes.find(x=>x.id===clickFirst);
+    if (n) {
+      ctx.beginPath();
+      ctx.arc(n.x,n.y,NODE_R+5,0,Math.PI*2);
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth   = 2;
+      ctx.setLineDash([4,4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+function drawEdge(a, b, weight, state) {
+  const dx = b.x-a.x, dy = b.y-a.y;
+  const len = Math.sqrt(dx*dx+dy*dy);
+  if (len===0) return;
+
+  // shorten to node border
+  const ux = dx/len, uy = dy/len;
+  const sx = a.x + ux*NODE_R, sy = a.y + uy*NODE_R;
+  const ex = b.x - ux*NODE_R, ey = b.y - uy*NODE_R;
+
+  let color, lw, glow;
+  if (state==='path')    { color=COLORS.edgePath;    lw=4; glow=true; }
+  else if(state==='relaxed') { color=COLORS.edgeRelaxed; lw=2.5; glow=false; }
+  else if(state==='current') { color=COLORS.edgeCurrent; lw=2.5; glow=true; }
+  else                   { color=COLORS.edgeDef;     lw=1.5; glow=false; }
+
+  if (glow) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur  = 12;
+  }
+  ctx.beginPath();
+  ctx.moveTo(sx,sy); ctx.lineTo(ex,ey);
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = lw;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // arrowhead
+  const angle = Math.atan2(dy,dx);
+  const ax = ex - 10*Math.cos(angle);
+  const ay = ey - 10*Math.sin(angle);
+  ctx.beginPath();
+  ctx.moveTo(ex,ey);
+  ctx.lineTo(ax - 6*Math.sin(angle), ay + 6*Math.cos(angle));
+  ctx.lineTo(ax + 6*Math.sin(angle), ay - 6*Math.cos(angle));
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  // weight label
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+  const nx2 = -uy*12, ny2 = ux*12;
+  ctx.fillStyle   = '#ffd700';
+  ctx.font        = 'bold 11px "Share Tech Mono"';
+  ctx.textAlign   = 'center';
+  ctx.textBaseline= 'middle';
+  // small bg
+  ctx.fillStyle   = 'rgba(5,10,15,.8)';
+  ctx.fillRect(mx+nx2-10, my+ny2-8, 20, 16);
+  ctx.fillStyle   = state==='relaxed' ? '#ffd700' : (state==='path' ? '#ff6b35' : '#3a6a90');
+  ctx.fillText(weight, mx+nx2, my+ny2);
+}
+
+function drawNode(n, state) {
+  let bg, border, glow;
+  if (state==='current') {
+    bg=COLORS.nodeCurrent; border=COLORS.accent; glow=true;
+  } else if (state==='visited') {
+    bg=COLORS.nodeVisited; border=COLORS.green; glow=false;
+  } else if (state==='path') {
+    bg='#3d1a00'; border=COLORS.orange; glow=true;
+  } else {
+    bg=COLORS.nodeBg; border=COLORS.nodeBorder; glow=false;
+  }
+
+  if (glow) { ctx.shadowColor=border; ctx.shadowBlur=20; }
+  ctx.beginPath();
+  ctx.arc(n.x,n.y,NODE_R,0,Math.PI*2);
+  ctx.fillStyle = bg;
+  ctx.fill();
+  ctx.strokeStyle = border;
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // label
+  ctx.fillStyle    = state==='current' ? COLORS.accent : COLORS.nodeText;
+  ctx.font         = `bold 13px "Exo 2"`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(n.label, n.x, n.y);
+
+  // dist label above
+  if (dist[n.id] !== undefined && dist[n.id] !== Infinity) {
+    const d = dist[n.id];
+    ctx.fillStyle = state==='path' ? COLORS.orange :
+                    state==='current' ? COLORS.accent :
+                    state==='visited' ? COLORS.green : COLORS.nodeText;
+    ctx.font = '10px "Share Tech Mono"';
+    ctx.fillText(d===Infinity?'∞':d, n.x, n.y - NODE_R - 6);
+  }
+}
+
+// ════════════════════════════════════════════
+//  GRAPH MANAGEMENT
+// ════════════════════════════════════════════
+let nextId = 0;
+const LABELS = 'ABCDEFGHIJKL';
+
+function addNode(x, y) {
+  if (nodes.length >= 12) return;
+  const id    = nextId++;
+  const label = LABELS[nodes.length] || String(nodes.length);
+  nodes.push({id, x, y, label});
+  populateSelects();
+  draw();
+}
+
+function addEdge(from, to, weight) {
+  // prevent duplicate
+  if (edges.find(e=> (e.from===from&&e.to===to)||(e.from===to&&e.to===from))) return;
+  edges.push({from, to, weight: parseInt(weight)||1});
+  draw();
+}
+
+function addEdgeManual() {
+  const f = parseInt(document.getElementById('edge-from').value);
+  const t = parseInt(document.getElementById('edge-to').value);
+  const w = parseInt(document.getElementById('edge-weight').value)||1;
+  if (f===t||isNaN(f)||isNaN(t)) return;
+  addEdge(f,t,w);
+  logEntry(`Edge ${getLabel(f)} → ${getLabel(t)} [w=${w}] added`, 'info');
+}
+
+function getLabel(id) {
+  const n = nodes.find(x=>x.id===id);
+  return n ? n.label : '?';
+}
+
+function clearGraph() {
+  nodes=[]; edges=[]; nextId=0;
+  resetViz();
+  populateSelects();
+  draw();
+  logEntry('Graph cleared', 'info');
+}
+
+function generateRandom() {
+  clearGraph();
+  const count = parseInt(document.getElementById('node-count').value)||7;
+  const W = canvas.width, H = canvas.height;
+  const margin = 80;
+
+  // place nodes in a circle + some random scatter
+  for (let i=0;i<count;i++) {
+    const angle = (i/count)*Math.PI*2 - Math.PI/2;
+    const r     = Math.min(W,H)/2 * 0.55;
+    const cx    = W/2 + Math.cos(angle)*r + (Math.random()-.5)*60;
+    const cy    = H/2 + Math.sin(angle)*r + (Math.random()-.5)*60;
+    addNode(
+      Math.max(margin, Math.min(W-margin, cx)),
+      Math.max(margin, Math.min(H-margin, cy))
+    );
+  }
+
+  // random edges — ensure connected
+  for (let i=0;i<count-1;i++) {
+    const w = Math.floor(Math.random()*15)+1;
+    addEdge(nodes[i].id, nodes[i+1].id, w);
+  }
+  // extra random edges
+  const extra = Math.floor(count * 1.5);
+  for (let k=0;k<extra;k++) {
+    const i = Math.floor(Math.random()*count);
+    const j = Math.floor(Math.random()*count);
+    if (i!==j) {
+      const w = Math.floor(Math.random()*20)+1;
+      addEdge(nodes[i].id, nodes[j].id, w);
+    }
+  }
+
+  logEntry(`Random graph: ${count} nodes, ${edges.length} edges`, 'info');
+  populateSelects();
+  draw();
+}
+
+// ════════════════════════════════════════════
+//  SELECTS
+// ════════════════════════════════════════════
+function populateSelects() {
+  const ids = ['edge-from','edge-to','src-node','tgt-node'];
+  ids.forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    sel.innerHTML = nodes.map(n=>`<option value="${n.id}">${n.label}</option>`).join('');
+    if ([...sel.options].find(o=>o.value==cur)) sel.value=cur;
+  });
+  updateDistTable();
+}
+
+// ════════════════════════════════════════════
+//  ALGORITHMS — build steps
+// ════════════════════════════════════════════
+
+function buildAdjacency() {
+  const adj = {};
+  nodes.forEach(n => adj[n.id]=[]);
+  edges.forEach(e => {
+    adj[e.from].push({to:e.to, w:e.weight});
+    adj[e.to].push({to:e.from, w:e.weight}); // undirected
+  });
+  return adj;
+}
+
+// ── Dijkstra ──────────────────────────────
+function buildDijkstraSteps(srcId) {
+  const steps = [];
+  const adj   = buildAdjacency();
+  const d     = {};
+  const p     = {};
+  const vis   = new Set();
+
+  nodes.forEach(n => { d[n.id]=Infinity; p[n.id]=null; });
+  d[srcId] = 0;
+
+  steps.push({ type:'init', dist:{...d}, prev:{...p}, msg:`Init: all distances = ∞, dist[${getLabel(srcId)}]=0` });
+
+  for (let iter=0; iter<nodes.length; iter++) {
+    // pick unvisited min
+    let u = null, minD = Infinity;
+    nodes.forEach(n => {
+      if (!vis.has(n.id) && d[n.id] < minD) { minD=d[n.id]; u=n.id; }
+    });
+    if (u===null) break;
+
+    vis.add(u);
+    steps.push({ type:'visit', node:u, dist:{...d}, prev:{...p},
+      msg:`Visit ${getLabel(u)} (dist=${d[u]===Infinity?'∞':d[u]})` });
+
+    for (const {to, w} of adj[u]) {
+      if (vis.has(to)) continue;
+      const newD = d[u] + w;
+      steps.push({ type:'relax', from:u, to, w, newD, oldD:d[to],
+        dist:{...d}, prev:{...p},
+        msg:`Relax ${getLabel(u)}→${getLabel(to)}: ${d[u]}+${w}=${newD} ${newD<d[to]?'< ':'≥ '}${d[to]===Infinity?'∞':d[to]}` });
+      if (newD < d[to]) {
+        d[to] = newD; p[to] = u;
+        steps.push({ type:'update', node:to, dist:{...d}, prev:{...p},
+          msg:`  ✓ Update dist[${getLabel(to)}]=${newD}, prev=${getLabel(u)}` });
+      }
+    }
+  }
+  steps.push({ type:'done', dist:{...d}, prev:{...p}, msg:'Dijkstra complete!' });
+  return { steps, finalDist:d, finalPrev:p };
+}
+
+// ── Bellman-Ford ───────────────────────────
+function buildBellmanSteps(srcId) {
+  const steps = [];
+  const d     = {};
+  const p     = {};
+
+  nodes.forEach(n => { d[n.id]=Infinity; p[n.id]=null; });
+  d[srcId] = 0;
+
+  steps.push({ type:'init', dist:{...d}, prev:{...p},
+    msg:`Init: dist[${getLabel(srcId)}]=0, others=∞` });
+
+  const N = nodes.length;
+  for (let iter=1; iter<N; iter++) {
+    steps.push({ type:'iteration', iter, dist:{...d}, prev:{...p},
+      msg:`── Iteration ${iter} of ${N-1} ──` });
+
+    let updated = false;
+    for (const e of edges) {
+      // forward
+      for (const [u,v] of [[e.from,e.to],[e.to,e.from]]) {
+        if (d[u]===Infinity) continue;
+        const newD = d[u]+e.weight;
+        steps.push({ type:'relax', from:u, to:v, w:e.weight, newD, oldD:d[v],
+          dist:{...d}, prev:{...p},
+          msg:`Relax ${getLabel(u)}→${getLabel(v)}: ${d[u]}+${e.weight}=${newD} ${newD<d[v]?'<':'≥'} ${d[v]===Infinity?'∞':d[v]}` });
+        if (newD < d[v]) {
+          d[v]=newD; p[v]=u; updated=true;
+          steps.push({ type:'update', node:v, dist:{...d}, prev:{...p},
+            msg:`  ✓ dist[${getLabel(v)}]=${newD}` });
+        }
+      }
+    }
+    if (!updated) {
+      steps.push({ type:'early', dist:{...d}, prev:{...p},
+        msg:`Early termination at iter ${iter} — no updates` });
+      break;
+    }
+  }
+  steps.push({ type:'done', dist:{...d}, prev:{...p}, msg:'Bellman-Ford complete!' });
+  return { steps, finalDist:d, finalPrev:p };
+}
+
+// ════════════════════════════════════════════
+//  SIMULATION CONTROL
+// ════════════════════════════════════════════
+let finalDist={}, finalPrev={};
+
+function runAlgo() {
+  if (nodes.length < 2) { logEntry('Need at least 2 nodes!','info'); return; }
+  if (simRunning) { stopSim(); return; }
+
+  resetViz();
+  const srcId = parseInt(document.getElementById('src-node').value);
+  const tgtId = parseInt(document.getElementById('tgt-node').value);
+
+  logEntry(`Running ${algo.toUpperCase()} from ${getLabel(srcId)} to ${getLabel(tgtId)}`, 'step');
+
+  const result = algo==='dijkstra'
+    ? buildDijkstraSteps(srcId)
+    : buildBellmanSteps(srcId);
+
+  simSteps   = result.steps;
+  finalDist  = result.finalDist;
+  finalPrev  = result.finalPrev;
+  simIndex   = 0;
+  simRunning = true;
+
+  document.getElementById('run-btn').textContent = '⏸ Pause';
+  simTimer = setInterval(()=>{
+    if (simIndex >= simSteps.length) {
+      stopSim();
+      showPath(srcId, tgtId);
+      return;
+    }
+    applyStep(simSteps[simIndex]);
+    simIndex++;
+  }, simSpeed);
+}
+
+function stopSim() {
+  clearInterval(simTimer);
+  simRunning = false;
+  document.getElementById('run-btn').textContent = '▶ Run Algorithm';
+}
+
+function stepAlgo() {
+  if (simSteps.length===0) {
+    // init steps without running
+    resetViz();
+    const srcId = parseInt(document.getElementById('src-node').value);
+    const tgtId = parseInt(document.getElementById('tgt-node').value);
+    const result = algo==='dijkstra'
+      ? buildDijkstraSteps(srcId)
+      : buildBellmanSteps(srcId);
+    simSteps  = result.steps;
+    finalDist = result.finalDist;
+    finalPrev = result.finalPrev;
+    simIndex  = 0;
+    logEntry(`Step mode: ${algo.toUpperCase()} from ${getLabel(srcId)}`, 'step');
+  }
+  if (simIndex >= simSteps.length) {
+    const tgtId = parseInt(document.getElementById('tgt-node').value);
+    const srcId = parseInt(document.getElementById('src-node').value);
+    showPath(srcId, tgtId);
+    return;
+  }
+  stopSim();
+  applyStep(simSteps[simIndex]);
+  simIndex++;
+}
+
+function applyStep(step) {
+  dist = {...step.dist};
+  prev = {...step.prev};
+
+  // reset edge states
+  Object.keys(edgeState).forEach(k => {
+    if (edgeState[k]!=='path') edgeState[k]='default';
+  });
+
+  if (step.type==='visit') {
+    nodeState[step.node] = 'current';
+  }
+  if (step.type==='relax'||step.type==='update') {
+    const k1=`${step.from}-${step.to}`, k2=`${step.to}-${step.from}`;
+    if (edgeState[k1]!=='path') edgeState[k1]='relaxed';
+    if (edgeState[k2]!=='path') edgeState[k2]='relaxed';
+    if (step.type==='update') {
+      nodeState[step.to] = 'visited';
+      // mark current node's previous visits done
+      Object.keys(nodeState).forEach(id=>{
+        if (nodeState[id]==='current' && parseInt(id)!==step.to)
+          nodeState[id]='visited';
+      });
+    }
+  }
+  if (step.type==='done') {
+    nodes.forEach(n => {
+      if (nodeState[n.id]==='current') nodeState[n.id]='visited';
+    });
+  }
+
+  logEntry(step.msg, step.type==='update'?'relax':
+    step.type==='visit'?'visit':
+    step.type==='done'?'done':'step');
+
+  document.getElementById('stat-step').textContent    = simIndex+1;
+  document.getElementById('stat-visited').textContent =
+    Object.values(nodeState).filter(v=>v==='visited'||v==='current').length;
+
+  updateDistTable();
+  draw();
+}
+
+function showPath(srcId, tgtId) {
+  // reconstruct path
+  const path = [];
+  let cur = tgtId;
+  while (cur !== null && cur !== undefined) {
+    path.unshift(cur);
+    if (cur === srcId) break;
+    cur = finalPrev[cur];
+    if (path.length > nodes.length) break; // cycle guard
+  }
+
+  if (path[0] !== srcId) {
+    logEntry(`No path from ${getLabel(srcId)} to ${getLabel(tgtId)}`, 'info');
+    return;
+  }
+
+  // color path edges and nodes
+  path.forEach(id => nodeState[id]='path');
+  for (let i=0;i<path.length-1;i++) {
+    const k1=`${path[i]}-${path[i+1]}`;
+    const k2=`${path[i+1]}-${path[i]}`;
+    edgeState[k1]='path'; edgeState[k2]='path';
+  }
+
+  const d = finalDist[tgtId];
+  logEntry(`Path: ${path.map(getLabel).join(' → ')}`, 'path');
+  logEntry(`Total distance: ${d===Infinity?'unreachable':d}`, 'done');
+
+  updateDistTable(path);
+  draw();
+}
+
+function resetViz() {
+  stopSim();
+  nodeState={};edgeState={};dist={};prev={};
+  simSteps=[];simIndex=0;
+  document.getElementById('stat-step').textContent='0';
+  document.getElementById('stat-visited').textContent='0';
+  updateDistTable();
+  draw();
+}
+
+// ════════════════════════════════════════════
+//  DISTANCE TABLE
+// ════════════════════════════════════════════
+function updateDistTable(path=[]) {
+  const tbody = document.getElementById('dist-tbody');
+  tbody.innerHTML = nodes.map(n=>{
+    const d  = dist[n.id];
+    const p  = prev[n.id];
+    const ds = (d===undefined||d===Infinity)?'∞':d;
+    const ps = p!==null&&p!==undefined ? getLabel(p) : '-';
+    const inPath = path.includes(n.id);
+    return `<tr class="${inPath?'path-row':''}">
+      <td>${n.label}</td><td>${ds}</td><td>${ps}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════
+//  MOUSE EVENTS
+// ════════════════════════════════════════════
+function getNodeAt(x,y) {
+  return nodes.find(n=>Math.hypot(n.x-x,n.y-y)<=NODE_R+4);
+}
+
+canvas.addEventListener('mousedown', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx   = e.clientX - rect.left;
+  const my   = e.clientY - rect.top;
+  const hit  = getNodeAt(mx,my);
+
+  if (e.button===2) {
+    // right click = delete node
+    if (hit) {
+      edges  = edges.filter(ed=>ed.from!==hit.id&&ed.to!==hit.id);
+      nodes  = nodes.filter(n=>n.id!==hit.id);
+      // relabel
+      nodes.forEach((n,i)=>n.label=LABELS[i]||String(i));
+      clickFirst=null;
+      populateSelects(); draw();
+    }
+    return;
+  }
+
+  if (hit) {
+    if (clickFirst === null) {
+      // start drag or edge
+      isDragging = true;
+      dragNode   = hit;
+      dragOffX   = mx - hit.x;
+      dragOffY   = my - hit.y;
+      clickFirst = hit.id;
+    } else if (clickFirst === hit.id) {
+      // deselect
+      clickFirst = null; isDragging=false; draw();
+    } else {
+      // add edge between clickFirst and hit
+      const w = parseInt(document.getElementById('edge-weight').value)||Math.floor(Math.random()*15)+1;
+      addEdge(clickFirst, hit.id, w);
+      logEntry(`Edge ${getLabel(clickFirst)} ↔ ${getLabel(hit.id)} [w=${w}]`, 'info');
+      clickFirst = null; isDragging=false; draw();
+    }
+  } else {
+    // click empty = add node
+    if (clickFirst!==null) { clickFirst=null; draw(); return; }
+    addNode(mx,my);
+    logEntry(`Node ${nodes[nodes.length-1].label} added`, 'info');
+  }
+});
+
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx   = e.clientX - rect.left;
+  const my   = e.clientY - rect.top;
+
+  if (isDragging && dragNode) {
+    dragNode.x = mx - dragOffX;
+    dragNode.y = my - dragOffY;
+    draw(); return;
+  }
+
+  // tooltip
+  const hit = getNodeAt(mx,my);
+  const tip  = document.getElementById('tooltip');
+  if (hit) {
+    const d = dist[hit.id];
+    tip.style.display = 'block';
+    tip.style.left    = (e.clientX+12)+'px';
+    tip.style.top     = (e.clientY-10)+'px';
+    tip.textContent   = `Node ${hit.label}  dist=${d===undefined||d===Infinity?'∞':d}`;
+  } else {
+    tip.style.display='none';
+  }
+});
+
+canvas.addEventListener('mouseup', ()=>{ isDragging=false; dragNode=null; });
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+// ════════════════════════════════════════════
+//  LOG
+// ════════════════════════════════════════════
+function logEntry(msg, cls='step') {
+  const log  = document.getElementById('log');
+  const div  = document.createElement('div');
+  div.className = `log-entry ${cls}`;
+  div.textContent = `> ${msg}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+function clearLog() { document.getElementById('log').innerHTML=''; }
+
+// ════════════════════════════════════════════
+//  ALGO SWITCH
+// ════════════════════════════════════════════
+function setAlgo(a) {
+  algo = a;
+  document.getElementById('btn-dijkstra').classList.toggle('active', a==='dijkstra');
+  document.getElementById('btn-bellman').classList.toggle('active',  a==='bellman');
+  resetViz();
+  logEntry(`Algorithm: ${a.toUpperCase()}`, 'info');
+}
+
+function updateSpeed() {
+  simSpeed = parseInt(document.getElementById('speed').value);
+  document.getElementById('speed-label').textContent = simSpeed+'ms';
+  if (simRunning) { stopSim(); runAlgo(); }
+}
+
+// ════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════
+window.addEventListener('load', ()=>{
+  resizeCanvas();
+  generateRandom();
+  logEntry('Welcome to NetRoute Simulator', 'done');
+  logEntry('Click canvas to add nodes', 'info');
+  logEntry('Click two nodes to connect them', 'info');
+  logEntry('Right-click a node to delete it', 'info');
+});
+</script>
+</body>
+</html>
+
+========== File: ./gitignore ==========
+
+��p r o x y _ c a c h e . e x e  
+ 
+========== File: ./src/proxy.cpp ==========
+
+#include "../include/proxy.h"
+#include "../include/logger.h"
+#include "../include/stats_writer.h"
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #include <windows.h>
+    #pragma comment(lib, "ws2_32.lib")
+    #define close(s) closesocket(s)
+    #define MSG_NOSIGNAL 0
+    typedef int socklen_t;
+#else
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <netinet/in.h>
+    #include <netdb.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <errno.h>
+#endif
+
+#include <thread>
+#include <cstring>
+#include <sstream>
+#include <regex>
+#include <algorithm>
+#include <string>
+
+#define RECV_BUFFER     8192
+#define CONNECT_TIMEOUT 10
+
+// ══════════════════════════════════════════════
+//  ProxyServer Constructor / Destructor
+// ══════════════════════════════════════════════
+
+ProxyServer::ProxyServer(const ProxyConfig& cfg)
+    : cfg_(cfg),
+      lru_cache_(cfg.max_entries, cfg.max_bytes, stats_),
+      lfu_cache_(cfg.max_entries, cfg.max_bytes, stats_),
+      hybrid_cache_(cfg.max_entries, cfg.max_bytes, stats_) {}
+
+ProxyServer::~ProxyServer() {
+    stop();
+}
+
+void ProxyServer::stop() {
+    running_ = false;
+    if (server_fd_ != -1) {
+        close(server_fd_);
+        server_fd_ = -1;
+    }
+}
+
+// ══════════════════════════════════════════════
+//  start() — main accept loop
+// ══════════════════════════════════════════════
+
+void ProxyServer::start() {
+
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        Logger::instance().error("WSAStartup failed");
+        return;
+    }
+#endif
+
+    server_fd_ = create_server_socket();
+    if (server_fd_ < 0) {
+        Logger::instance().error("Failed to create server socket");
+        return;
+    }
+
+    running_ = true;
+    StatsDisplay::print_banner();
+    Logger::instance().info("Proxy listening on port " + std::to_string(cfg_.port));
+    
+    std::string pol_str;
+    if (cfg_.policy == EvictionPolicy::LRU) pol_str = "LRU";
+    else if (cfg_.policy == EvictionPolicy::LFU) pol_str = "LFU";
+    else pol_str = "HYBRID";
+    Logger::instance().info("Policy: " + pol_str);
+    
+    Logger::instance().info("Max entries: " + std::to_string(cfg_.max_entries) +
+                            " | Max size: " + StatsDisplay::format_bytes(cfg_.max_bytes));
+
+    // periodic TTL cleanup thread
+    std::thread([this]() {
+        while (running_) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            lru_cache_.evict_expired();
+            lfu_cache_.evict_expired();
+            hybrid_cache_.evict_expired();
+            Logger::instance().debug("TTL cleanup pass done");
+        }
+    }).detach();
+
+    std::thread([this]() {
+    while (running_) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        
+        size_t entries = 0, bytes = 0;
+        std::string pol;
+        
+        if (cfg_.policy == EvictionPolicy::LRU) {
+            entries = lru_cache_.size(); bytes = lru_cache_.bytes(); pol = "LRU";
+        } else if (cfg_.policy == EvictionPolicy::LFU) {
+            entries = lfu_cache_.size(); bytes = lfu_cache_.bytes(); pol = "LFU";
+        } else {
+            entries = hybrid_cache_.size(); bytes = hybrid_cache_.bytes(); pol = "HYBRID";
+        }
+
+        StatsDisplay::print_stats(stats_, entries, bytes);
+        StatsWriter::instance().write(stats_, entries, bytes, cfg_.max_entries, cfg_.max_bytes, pol);
+    }
+    }).detach();
+
+    // main accept loop
+    while (running_) {
+        sockaddr_in client_addr{};
+        socklen_t   client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd_, (sockaddr*)&client_addr, &client_len);
+
+        if (client_fd < 0) {
+            if (running_) Logger::instance().warn("accept() failed");
+            continue;
+        }
+
+        stats_.active_connections++;
+
+        // spawn a detached thread per client
+        std::thread([this, client_fd]() {
+            handle_client(client_fd);
+        }).detach();
+    }
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+// ══════════════════════════════════════════════
+//  handle_client — runs per connection thread
+// ══════════════════════════════════════════════
+
+void ProxyServer::handle_client(int client_fd) {
+
+    std::string raw = recv_all(client_fd);
+    if (raw.empty()) {
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    HttpRequest req = parse_request(raw);
+    if (!req.valid) {
+        Logger::instance().warn("Invalid request — dropping");
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    // blacklist check
+    if (is_blacklisted(req.host)) {
+        std::string blocked =
+            "HTTP/1.1 403 Forbidden\r\n"
+            "Content-Type: text/html\r\n\r\n"
+            "<h1>403 Forbidden</h1><p>Domain blocked by proxy.</p>";
+        send_all(client_fd, blocked);
+        Logger::instance().warn("BLOCKED: " + req.host);
+        close(client_fd);
+        stats_.active_connections--;
+        return;
+    }
+
+    std::string response;
+    bool hit = false;
+
+    if (req.method == "GET") {
+        hit = cache_get(req.url, response);
+    }
+
+    if (!hit) {
+        response = fetch_from_origin(req);
+        if (response.empty()) {
+            std::string err =
+                "HTTP/1.1 502 Bad Gateway\r\n"
+                "Content-Type: text/html\r\n\r\n"
+                "<h1>502 Bad Gateway</h1><p>Could not reach origin.</p>";
+            send_all(client_fd, err);
+            close(client_fd);
+            stats_.active_connections--;
+            return;
+        }
+        if (req.method == "GET" && is_cacheable(req, response)) {
+            int ttl = parse_ttl_from_headers(response);
+            cache_put(req.url, response, ttl);
+        }
+    }
+
+    log_request(req, hit, response.size());
+    stats_.total_bytes_served += response.size();
+    send_all(client_fd, response);
+    close(client_fd);
+    stats_.active_connections--;
+}
+
+// ══════════════════════════════════════════════
+//  HTTP Parsing
+// ══════════════════════════════════════════════
+
+HttpRequest ProxyServer::parse_request(const std::string& raw) {
+    HttpRequest req;
+    req.raw = raw;
+
+    std::istringstream stream(raw);
+    std::string line;
+    if (!std::getline(stream, line)) return req;
+
+    std::istringstream first_line(line);
+    std::string url_str;
+    first_line >> req.method >> url_str;
+    if (req.method.empty() || url_str.empty()) return req;
+
+    if (url_str.substr(0, 7) == "http://")  url_str = url_str.substr(7);
+    if (url_str.substr(0, 8) == "https://") url_str = url_str.substr(8);
+
+    auto slash = url_str.find('/');
+    std::string host_port = (slash != std::string::npos) ? url_str.substr(0, slash) : url_str;
+    req.path = (slash != std::string::npos) ? url_str.substr(slash) : "/";
+
+    auto colon = host_port.find(':');
+    if (colon != std::string::npos) {
+        req.host = host_port.substr(0, colon);
+        try { req.port = std::stoi(host_port.substr(colon + 1)); }
+        catch (...) { req.port = 80; }
+    } else {
+        req.host = host_port;
+        req.port = 80;
+    }
+
+    while (std::getline(stream, line)) {
+        if (line.find("Host:") == 0 || line.find("host:") == 0) {
+            auto val = line.substr(line.find(':') + 1);
+            val.erase(0, val.find_first_not_of(" \t\r\n"));
+            val.erase(val.find_last_not_of(" \t\r\n") + 1);
+            if (req.host.empty()) req.host = val;
+        }
+    }
+
+    if (req.host.empty()) return req;
+    req.url   = "http://" + req.host + req.path;
+    req.valid = true;
+    return req;
+}
+
+// ══════════════════════════════════════════════
+//  Origin Fetch
+// ══════════════════════════════════════════════
+
+std::string ProxyServer::fetch_from_origin(const HttpRequest& req) {
+    int sock = connect_to_host(req.host, req.port);
+    if (sock < 0) {
+        Logger::instance().error("Cannot connect to " + req.host);
+        return "";
+    }
+
+    std::string forward =
+        req.method + " " + req.path + " HTTP/1.0\r\n" +
+        "Host: " + req.host + "\r\n" +
+        "Connection: close\r\n" +
+        "User-Agent: ProxyCache/1.0\r\n\r\n";
+
+    send_all(sock, forward);
+    std::string response = recv_http_response(sock);
+    close(sock);
+    return response;
+}
+
+// ══════════════════════════════════════════════
+//  Header Helpers
+// ══════════════════════════════════════════════
+
+int ProxyServer::parse_ttl_from_headers(const std::string& response) {
+    std::regex cc_regex("Cache-Control:.*?max-age=(\\d+)", std::regex::icase);
+    std::smatch match;
+    if (std::regex_search(response, match, cc_regex)) {
+        try { return std::stoi(match[1].str()); }
+        catch (...) {}
+    }
+    return cfg_.default_ttl;
+}
+
+bool ProxyServer::is_cacheable(const HttpRequest& req, const std::string& response) {
+    if (req.method != "GET") return false;
+    if (response.find("no-store") != std::string::npos) return false;
+    if (response.find("no-cache") != std::string::npos) return false;
+    if (response.find("HTTP/1.0 200") == std::string::npos &&
+        response.find("HTTP/1.1 200") == std::string::npos) return false;
+    return true;
+}
+
+bool ProxyServer::is_blacklisted(const std::string& host) {
+    for (const auto& domain : cfg_.blacklist) {
+        if (host.find(domain) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// ══════════════════════════════════════════════
+//  Cache Dispatch
+// ══════════════════════════════════════════════
+
+bool ProxyServer::cache_get(const std::string& url, std::string& out) {
+    if (cfg_.policy == EvictionPolicy::HYBRID) return hybrid_cache_.get(url, out);
+    if (cfg_.policy == EvictionPolicy::LRU) return lru_cache_.get(url, out);
+    return lfu_cache_.get(url, out);
+}
+
+void ProxyServer::cache_put(const std::string& url, const std::string& resp, int ttl) {
+    if (cfg_.policy == EvictionPolicy::HYBRID) hybrid_cache_.put(url, resp, ttl);
+    else if (cfg_.policy == EvictionPolicy::LRU) lru_cache_.put(url, resp, ttl);
+    else lfu_cache_.put(url, resp, ttl);
+}
+
+// ══════════════════════════════════════════════
+//  Socket Helpers
+// ══════════════════════════════════════════════
+
+int ProxyServer::create_server_socket() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(cfg_.port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0) { close(fd); return -1; }
+    if (listen(fd, 128) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+int ProxyServer::connect_to_host(const std::string& host, int port) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0)
+        return -1;
+
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return -1; }
+
+    if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+        close(sock); freeaddrinfo(res); return -1;
+    }
+
+    freeaddrinfo(res);
+    return sock;
+}
+
+void ProxyServer::send_all(int fd, const std::string& data) {
+    size_t total = 0;
+    while (total < data.size()) {
+        int sent = send(fd, data.c_str() + total, (int)(data.size() - total), 0);
+        if (sent <= 0) break;
+        total += sent;
+    }
+}
+
+std::string ProxyServer::recv_all(int fd) {
+    std::string result;
+    char buf[RECV_BUFFER];
+    int n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        result.append(buf, n);
+        if (result.find("\r\n\r\n") != std::string::npos) break;
+    }
+    return result;
+}
+
+std::string ProxyServer::recv_http_response(int fd) {
+    std::string result;
+    char buf[RECV_BUFFER];
+    int n;
+    while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+        result.append(buf, n);
+    }
+    return result;
+}
+
+// ══════════════════════════════════════════════
+//  Logging
+// ══════════════════════════════════════════════
+
+void ProxyServer::log(const std::string& msg) const {
+    Logger::instance().info(msg);
+}
+
+void ProxyServer::log_request(const HttpRequest& req, bool hit, size_t bytes) const {
+    std::string status = hit ? "[HIT] " : "[MISS]";
+    std::string msg    = status + " " + req.method + " " + req.url +
+                         " — " + StatsDisplay::format_bytes(bytes);
+    Logger::instance().info(msg);
+
+    StatsWriter::instance().log_request(req.url, hit, bytes);
+}
+========== File: ./src/cache.cpp ==========
+
+#include "../include/cache.h"
+#include <algorithm>
+
+// ══════════════════════════════════════════════
+//  LRUCache Implementation
+// ══════════════════════════════════════════════
+
+bool LRUCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = map_.find(url);
+    if (it == map_.end()) {
+        stats_.misses++;
+        return false;
+    }
+
+    // check TTL expiry
+    if (it->second->is_expired()) {
+        current_bytes_ -= it->second->size;
+        lru_list_.erase(it->second);
+        map_.erase(it);
+        stats_.misses++;
+        stats_.evictions++;
+        return false;
+    }
+
+    // move to front (most recently used)
+    it->second->last_accessed = std::chrono::steady_clock::now();
+    lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+
+    out_response = it->second->response;
+    stats_.hits++;
+    stats_.bytes_saved += it->second->size;
+    return true;
+}
+
+void LRUCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // if already exists, remove old entry
+    auto it = map_.find(url);
+    if (it != map_.end()) {
+        current_bytes_ -= it->second->size;
+        lru_list_.erase(it->second);
+        map_.erase(it);
+    }
+
+    // evict if over limits
+    while (!lru_list_.empty() &&
+           (map_.size() >= max_entries_ || current_bytes_ + response.size() > max_bytes_)) {
+        evict_one();
+    }
+
+    CacheEntry entry(url, response, ttl);
+    lru_list_.push_front(entry);
+    map_[url] = lru_list_.begin();
+    current_bytes_ += response.size();
+}
+
+bool LRUCache::remove(const std::string& url) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = map_.find(url);
+    if (it == map_.end()) return false;
+    
+    current_bytes_ -= it->second->size;
+    lru_list_.erase(it->second);
+    map_.erase(it);
+    return true;
+}
+
+void LRUCache::evict_one() {
+    if (lru_list_.empty()) return;
+    auto& last = lru_list_.back();
+    current_bytes_ -= last.size;
+    map_.erase(last.url);
+    lru_list_.pop_back();
+    stats_.evictions++;
+}
+
+void LRUCache::evict_expired() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = lru_list_.begin(); it != lru_list_.end(); ) {
+        if (it->is_expired()) {
+            current_bytes_ -= it->size;
+            map_.erase(it->url);
+            it = lru_list_.erase(it);
+            stats_.evictions++;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void LRUCache::print_contents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::cout << "\n[LRU Cache Contents — " << map_.size() << " entries, "
+              << current_bytes_ / 1024 << " KB]\n";
+    int i = 1;
+    for (const auto& e : lru_list_) {
+        std::cout << "  " << i++ << ". " << e.url
+                  << " [" << e.size / 1024 << " KB, TTL=" << e.ttl_seconds << "s]\n";
+        if (i > 10) { std::cout << "  ... (showing first 10)\n"; break; }
+    }
+}
+
+// ══════════════════════════════════════════════
+//  LFUCache Implementation
+// ══════════════════════════════════════════════
+
+bool LFUCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = key_map_.find(url);
+    if (it == key_map_.end()) {
+        stats_.misses++;
+        return false;
+    }
+
+    if (it->second.entry.is_expired()) {
+        // remove from freq_map
+        int freq = it->second.entry.frequency;
+        freq_map_[freq].erase(it->second.it);
+        if (freq_map_[freq].empty()) freq_map_.erase(freq);
+        current_bytes_ -= it->second.entry.size;
+        key_map_.erase(it);
+        stats_.misses++;
+        stats_.evictions++;
+        return false;
+    }
+
+    increment_freq(url);
+    out_response = key_map_[url].entry.response;
+    stats_.hits++;
+    stats_.bytes_saved += key_map_[url].entry.size;
+    return true;
+}
+
+void LFUCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (key_map_.count(url)) {
+        key_map_[url].entry.response = response;
+        key_map_[url].entry.size     = response.size();
+        increment_freq(url);
+        return;
+    }
+
+    while (!key_map_.empty() &&
+           (key_map_.size() >= max_entries_ || current_bytes_ + response.size() > max_bytes_)) {
+        evict_one();
+    }
+
+    CacheEntry entry(url, response, ttl);
+    entry.frequency = 1;
+
+    freq_map_[1].push_back(url);
+    auto list_it = std::prev(freq_map_[1].end());
+
+    key_map_[url] = { entry, list_it };
+    current_bytes_ += response.size();
+    min_freq_ = 1;
+}
+
+void LFUCache::reset_ttl(const std::string& url, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = key_map_.find(url);
+    if (it != key_map_.end()) {
+        it->second.entry.inserted_at = std::chrono::steady_clock::now();
+        it->second.entry.ttl_seconds = ttl;
+    }
+}
+
+void LFUCache::increment_freq(const std::string& url) {
+    auto& node = key_map_[url];
+    int old_freq = node.entry.frequency;
+    int new_freq = old_freq + 1;
+
+    // remove from old freq bucket
+    freq_map_[old_freq].erase(node.it);
+    if (freq_map_[old_freq].empty()) {
+        freq_map_.erase(old_freq);
+        if (min_freq_ == old_freq) min_freq_ = new_freq;
+    }
+
+    // insert into new freq bucket
+    freq_map_[new_freq].push_back(url);
+    node.it = std::prev(freq_map_[new_freq].end());
+    node.entry.frequency = new_freq;
+    node.entry.last_accessed = std::chrono::steady_clock::now();
+}
+
+void LFUCache::evict_one() {
+    if (key_map_.empty()) return;
+    auto& min_list = freq_map_[min_freq_];
+    if (min_list.empty()) return;
+
+    std::string evict_url = min_list.front();
+    min_list.pop_front();
+    if (min_list.empty()) freq_map_.erase(min_freq_);
+
+    current_bytes_ -= key_map_[evict_url].entry.size;
+    key_map_.erase(evict_url);
+    stats_.evictions++;
+}
+
+void LFUCache::evict_expired() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> to_remove;
+
+    for (auto& [url, node] : key_map_) {
+        if (node.entry.is_expired()) to_remove.push_back(url);
+    }
+
+    for (const auto& url : to_remove) {
+        auto& node = key_map_[url];
+        int freq = node.entry.frequency;
+        freq_map_[freq].erase(node.it);
+        if (freq_map_[freq].empty()) freq_map_.erase(freq);
+        current_bytes_ -= node.entry.size;
+        key_map_.erase(url);
+        stats_.evictions++;
+    }
+}
+
+void LFUCache::print_contents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::cout << "\n[LFU Cache Contents — " << key_map_.size() << " entries, "
+              << current_bytes_ / 1024 << " KB]\n";
+    int i = 1;
+    for (const auto& [url, node] : key_map_) {
+        std::cout << "  " << i++ << ". " << url
+                  << " [freq=" << node.entry.frequency
+                  << ", " << node.entry.size / 1024 << " KB]\n";
+        if (i > 10) { std::cout << "  ... (showing first 10)\n"; break; }
+    }
+}
+
+// ══════════════════════════════════════════════
+//  HybridCache Implementation
+// ══════════════════════════════════════════════
+
+HybridCache::HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats, int threshold)
+    : max_entries_(max_entries), max_bytes_(max_bytes), threshold_T_(threshold), stats_(stats),
+      lru_tier_(max_entries / 2, max_bytes / 2, stats), // Give 50% capacity to LRU
+      lfu_tier_(max_entries / 2, max_bytes / 2, stats)  // Give 50% capacity to LFU
+{}
+
+bool HybridCache::get(const std::string& url, std::string& out_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 1. Check the LRU Tier
+    if (lru_tier_.get(url, out_response)) {
+        global_freq_[url]++;
+        
+        // Threshold check for graduation
+        if (global_freq_[url] > threshold_T_) {
+            lru_tier_.remove(url);
+            lfu_tier_.put(url, out_response, 300); // Graduate to LFU with fresh TTL
+        }
+        return true;
+    }
+
+    // 2. Check the LFU Tier
+    if (lfu_tier_.get(url, out_response)) {
+        global_freq_[url]++;
+        lfu_tier_.reset_ttl(url, 300); // Reset TTL on hit as per the paper
+        return true;
+    }
+
+    return false;
+}
+
+void HybridCache::put(const std::string& url, const std::string& response, int ttl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Paper logic: New items always go into LRU first, frequency starts at 1
+    global_freq_[url] = 1;
+    lru_tier_.put(url, response, ttl); 
+}
+
+void HybridCache::evict_expired() {
+    lru_tier_.evict_expired();
+    lfu_tier_.evict_expired();
+}
+
+size_t HybridCache::size() const { return lru_tier_.size() + lfu_tier_.size(); }
+size_t HybridCache::bytes() const { return lru_tier_.bytes() + lfu_tier_.bytes(); }
+
+void HybridCache::print_contents() const {
+    lru_tier_.print_contents();
+    lfu_tier_.print_contents();
+}
+========== File: ./src/logger.cpp ==========
+
+#include "../include/logger.h"
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+
+// ══════════════════════════════════════════════
+//  Logger
+// ══════════════════════════════════════════════
+
+void Logger::init(const std::string& logfile, bool verbose) {
+    verbose_ = verbose;
+    file_.open(logfile, std::ios::app);
+    if (!file_.is_open()) {
+        std::cerr << "[Logger] WARNING: Could not open log file: " << logfile << "\n";
+    }
+}
+
+void Logger::log(Level level, const std::string& msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string line = "[" + timestamp() + "] [" + level_str(level) + "] " + msg;
+    std::cout << line << "\n";
+    if (file_.is_open()) file_ << line << "\n" << std::flush;
+}
+
+std::string Logger::timestamp() {
+    auto now  = std::time(nullptr);
+    auto* tm  = std::localtime(&now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm);
+    return std::string(buf);
+}
+
+std::string Logger::level_str(Level l) {
+    switch (l) {
+        case Level::INFO:  return " INFO";
+        case Level::WARN:  return " WARN";
+        case Level::ERROR: return "ERROR";
+        case Level::DEBUG: return "DEBUG";
+        default:           return "     ";
+    }
+}
+
+// ══════════════════════════════════════════════
+//  StatsDisplay
+// ══════════════════════════════════════════════
+
+void StatsDisplay::print_banner() {
+    std::cout << "\n";
+    std::cout << "****************************************************\n";
+    std::cout << "*       HTTP Proxy Cache Server  --  C++           *\n";
+    std::cout << "*       LRU / LFU  |  Multi-Threaded               *\n";
+    std::cout << "****************************************************\n\n";
+}
+
+void StatsDisplay::print_stats(const CacheStats& s, size_t entries, size_t bytes) {
+    std::cout << "\n+---------------------- CACHE STATS ----------------------+\n";
+    std::cout << "|  Hits:              " << std::setw(10) << s.hits
+              << "                          |\n";
+    std::cout << "|  Misses:            " << std::setw(10) << s.misses
+              << "                          |\n";
+    std::cout << "|  Hit Ratio:         " << std::setw(9)  << std::fixed
+              << std::setprecision(1)     << s.hit_ratio()
+              << "%                         |\n";
+    std::cout << "|  Evictions:         " << std::setw(10) << s.evictions
+              << "                          |\n";
+    std::cout << "|  Bandwidth Saved:   " << std::setw(10) << format_bytes(s.bytes_saved)
+              << "                  |\n";
+    std::cout << "|  Active Conns:      " << std::setw(10) << s.active_connections
+              << "                       |\n";
+    std::cout << "|  Cache Entries:     " << std::setw(10) << entries
+              << "                          |\n";
+    std::cout << "|  Cache Size:        " << std::setw(10) << format_bytes(bytes)
+              << "                     |\n";
+    std::cout << "+---------------------------------------------------------+\n";
+}
+
+void StatsDisplay::print_separator() {
+    std::cout << "---------------------------------------------------------\n";
+}
+
+std::string StatsDisplay::format_bytes(size_t bytes) {
+    std::ostringstream oss;
+    if (bytes >= 1024 * 1024)
+        oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0)) << " MB";
+    else if (bytes >= 1024)
+        oss << std::fixed << std::setprecision(1) << (bytes / 1024.0) << " KB";
+    else
+        oss << bytes << " B";
+    return oss.str();
+}
+
+========== File: ./src/main.cpp ==========
+
+#include "../include/proxy.h"
+#include "../include/logger.h"
+#include <iostream>
+#include <csignal>
+#include <string>
+
+// ─────────────────────────────────────────────
+//  Global proxy pointer for signal handler
+// ─────────────────────────────────────────────
+static ProxyServer* g_proxy = nullptr;
+
+void signal_handler(int sig) {
+    std::cout << "\n[SIGNAL] Caught signal " << sig << " — shutting down...\n";
+    if (g_proxy) g_proxy->stop();
+    std::exit(0);
+}
+
+// ─────────────────────────────────────────────
+//  Usage
+// ─────────────────────────────────────────────
+void print_usage(const char* prog) {
+    std::cout << "\nUsage: " << prog << " [OPTIONS]\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  -p <port>         Port to listen on          (default: 8080)\n";
+    std::cout << "  -e <entries>      Max cache entries          (default: 500)\n";
+    std::cout << "  -m <MB>           Max cache size in MB       (default: 50)\n";
+    std::cout << "  -t <seconds>      Default TTL in seconds     (default: 300)\n";
+    std::cout << "  -P <lru|lfu|hybrid> Eviction policy        (default: lru)\n";
+    std::cout << "  -b <domain>       Blacklist a domain         (repeatable)\n";
+    std::cout << "  -v                Verbose / debug logging\n";
+    std::cout << "  -h                Show this help\n\n";
+    std::cout << "Examples:\n";
+    std::cout << "  " << prog << " -p 8080 -P hybrid -m 100 -t 600\n";
+    std::cout << "  " << prog << " -p 3128 -P lfu -b ads.example.com -v\n\n";
+}
+
+// ─────────────────────────────────────────────
+//  main
+// ─────────────────────────────────────────────
+int main(int argc, char* argv[]) {
+    ProxyConfig cfg;
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg == "-h" || arg == "--help") {
+            print_usage(argv[0]);
+            return 0;
+        }
+        else if (arg == "-p" && i + 1 < argc) {
+            cfg.port = std::stoi(argv[++i]);
+        }
+        else if (arg == "-e" && i + 1 < argc) {
+            cfg.max_entries = std::stoul(argv[++i]);
+        }
+        else if (arg == "-m" && i + 1 < argc) {
+            cfg.max_bytes = std::stoul(argv[++i]) * 1024 * 1024;
+        }
+        else if (arg == "-t" && i + 1 < argc) {
+            cfg.default_ttl = std::stoi(argv[++i]);
+        }
+        else if (arg == "-P" && i + 1 < argc) {
+            std::string pol = argv[++i];
+            if (pol == "lfu") cfg.policy = EvictionPolicy::LFU;
+            else if (pol == "hybrid") cfg.policy = EvictionPolicy::HYBRID;
+            else cfg.policy = EvictionPolicy::LRU;
+        }
+        else if (arg == "-b" && i + 1 < argc) {
+            cfg.blacklist.insert(argv[++i]);
+        }
+        else if (arg == "-v") {
+            cfg.verbose = true;
+        }
+        else {
+            std::cerr << "Unknown option: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    // init logger
+    Logger::instance().init("proxy.log", cfg.verbose);
+
+    // signal handling (no SIGPIPE on Windows)
+    std::signal(SIGINT,  signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    // start proxy
+    ProxyServer proxy(cfg);
+    g_proxy = &proxy;
+    proxy.start();
+
+    return 0;
+}

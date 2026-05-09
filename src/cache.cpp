@@ -245,6 +245,30 @@ HybridCache::HybridCache(size_t max_entries, size_t max_bytes, CacheStats& stats
       lfu_tier_(max_entries / 2, max_bytes / 2, stats)  // Give 50% capacity to LFU
 {}
 
+// bool HybridCache::get(const std::string& url, std::string& out_response) {
+//     std::lock_guard<std::mutex> lock(mutex_);
+
+//     // 1. Check the LRU Tier
+//     if (lru_tier_.get(url, out_response)) {
+//         global_freq_[url]++;
+        
+//         // Threshold check for graduation
+//         if (global_freq_[url] > threshold_T_) {
+//             lru_tier_.remove(url);
+//             lfu_tier_.put(url, out_response, 300); // Graduate to LFU with fresh TTL
+//         }
+//         return true;
+//     }
+
+//     // 2. Check the LFU Tier
+//     if (lfu_tier_.get(url, out_response)) {
+//         global_freq_[url]++;
+//         lfu_tier_.reset_ttl(url, 300); // Reset TTL on hit as per the paper
+//         return true;
+//     }
+
+//     return false;
+// }
 bool HybridCache::get(const std::string& url, std::string& out_response) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -264,11 +288,21 @@ bool HybridCache::get(const std::string& url, std::string& out_response) {
     if (lfu_tier_.get(url, out_response)) {
         global_freq_[url]++;
         lfu_tier_.reset_ttl(url, 300); // Reset TTL on hit as per the paper
+        
+        // FIX: The LRU tier above just falsely logged a "Miss" in our global stats.
+        // Since we found it in the LFU tier, we need to erase that fake miss!
+        stats_.misses--; 
         return true;
     }
 
+    // 3. If we are here, the item is completely missing.
+    // FIX: Both LRU and LFU logged a "Miss" (adding +2 misses to our stats).
+    // We only want this to count as +1 total miss.
+    stats_.misses--; 
+
     return false;
 }
+
 
 void HybridCache::put(const std::string& url, const std::string& response, int ttl) {
     std::lock_guard<std::mutex> lock(mutex_);

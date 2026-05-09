@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cache Eviction Simulator</title>
+    <style>
+        :root {
+            --bg: #1e1e2e;
+            --panel: #282a36;
+            --text: #f8f8f2;
+            --primary: #bd93f9;
+            --hit: #50fa7b;
+            --miss: #ff5555;
+            --A: #ffb86c; --B: #8be9fd; --C: #ff79c6; --D: #f1fa8c; --E: #50fa7b;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 { margin-top: 0; color: var(--primary); }
+
+        .controls, .stats, .actions {
+            background: var(--panel);
+            padding: 15px 25px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            width: 100%;
+            max-width: 800px;
+            justify-content: center;
+        }
+
+        select, input, button {
+            padding: 8px 12px;
+            border-radius: 5px;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            outline: none;
+        }
+
+        button { font-weight: bold; transition: transform 0.1s; }
+        button:active { transform: scale(0.95); }
+        .btn-A { background: var(--A); color: #000; }
+        .btn-B { background: var(--B); color: #000; }
+        .btn-C { background: var(--C); color: #000; }
+        .btn-D { background: var(--D); color: #000; }
+        .btn-E { background: var(--E); color: #000; }
+
+        .visualization {
+            background: var(--panel);
+            padding: 20px;
+            border-radius: 8px;
+            width: 100%;
+            max-width: 800px;
+            height: 250px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .tier-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; color: #888; }
+        
+        .cache-row {
+            display: flex;
+            gap: 15px;
+            height: 80px;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+        }
+
+        .cache-block {
+            width: 60px;
+            height: 60px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #000;
+            position: relative;
+            animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+            transition: all 0.3s ease;
+        }
+
+        .badge {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: red;
+            color: white;
+            font-size: 12px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            border: 2px solid var(--panel);
+        }
+
+        .bg-A { background: var(--A); }
+        .bg-B { background: var(--B); }
+        .bg-C { background: var(--C); }
+        .bg-D { background: var(--D); }
+        .bg-E { background: var(--E); }
+
+        @keyframes popIn {
+            0% { transform: scale(0.5) translateY(-20px); opacity: 0; }
+            100% { transform: scale(1) translateY(0); opacity: 1; }
+        }
+
+        .log-container {
+            margin-top: 15px;
+            background: #000;
+            width: 100%;
+            max-width: 800px;
+            height: 150px;
+            border-radius: 8px;
+            padding: 10px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        .log-entry { margin-bottom: 5px; }
+        .log-hit { color: var(--hit); }
+        .log-miss { color: var(--miss); }
+        .log-info { color: #888; }
+        .log-grad { color: var(--primary); font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>🧠 Proxy Cache Simulator</h1>
+
+    <div class="controls">
+        <label>Policy: 
+            <select id="policySelect" onchange="resetCache()">
+                <option value="lru">LRU (Least Recently Used)</option>
+                <option value="lfu">LFU (Least Frequently Used)</option>
+                <option value="hybrid">Hybrid (Probation + VIP)</option>
+            </select>
+        </label>
+        <label>Capacity: 
+            <input type="number" id="capacityInput" value="4" min="2" max="10" onchange="resetCache()">
+        </label>
+        <button onclick="resetCache()" style="background: var(--miss); color: white;">Reset System</button>
+    </div>
+
+    <div class="stats">
+        <div>Total Hits: <span id="hitCount" style="color: var(--hit); font-weight:bold;">0</span></div>
+        <div>Total Misses: <span id="missCount" style="color: var(--miss); font-weight:bold;">0</span></div>
+        <div>Hit Ratio: <span id="hitRatio">0%</span></div>
+    </div>
+
+    <div class="actions">
+        <span>Request Webpage: </span>
+        <button class="btn-A" onclick="requestPage('A')">Page A</button>
+        <button class="btn-B" onclick="requestPage('B')">Page B</button>
+        <button class="btn-C" onclick="requestPage('C')">Page C</button>
+        <button class="btn-D" onclick="requestPage('D')">Page D</button>
+        <button class="btn-E" onclick="requestPage('E')">Page E</button>
+    </div>
+
+    <div class="visualization" id="vizContainer">
+        <!-- Visualization renders here -->
+    </div>
+
+    <div class="log-container" id="logBox"></div>
+
+    <script>
+        // --- State Variables ---
+        let hits = 0, misses = 0;
+        let lruCache = []; // Array of string IDs
+        let lfuCache = []; // Array of {id, freq, time}
+        let hybridLRU = []; // Array of string IDs
+        let hybridLFU = []; // Array of string IDs
+        let globalFreq = {}; // Map of id -> count
+        let timeStep = 0;
+
+        // --- Core Engine ---
+        function requestPage(page) {
+            const policy = document.getElementById('policySelect').value;
+            const capacity = parseInt(document.getElementById('capacityInput').value);
+            timeStep++;
+
+            if (policy === 'lru') handleLRU(page, capacity);
+            if (policy === 'lfu') handleLFU(page, capacity);
+            if (policy === 'hybrid') handleHybrid(page, capacity);
+
+            updateStats();
+            renderVisuals(policy);
+        }
+
+        function handleLRU(page, capacity) {
+            const index = lruCache.indexOf(page);
+            if (index !== -1) {
+                // HIT: Move to front
+                lruCache.splice(index, 1);
+                lruCache.unshift(page);
+                hits++;
+                addLog(`Hit! ${page} moved to the front.`, 'hit');
+            } else {
+                // MISS
+                misses++;
+                lruCache.unshift(page); // Add to front
+                addLog(`Miss. Downloaded ${page} from internet.`, 'miss');
+                if (lruCache.length > capacity) {
+                    const evicted = lruCache.pop(); // Remove from back
+                    addLog(`Cache Full! Evicted ${evicted} from the back.`, 'info');
+                }
+            }
+        }
+
+        function handleLFU(page, capacity) {
+            const existing = lfuCache.find(item => item.id === page);
+            if (existing) {
+                // HIT
+                existing.freq++;
+                existing.time = timeStep;
+                hits++;
+                addLog(`Hit! ${page} view count increased to ${existing.freq}.`, 'hit');
+            } else {
+                // MISS
+                misses++;
+                addLog(`Miss. Downloaded ${page} from internet.`, 'miss');
+                if (lfuCache.length >= capacity) {
+                    // Find lowest frequency, tie-break with oldest time
+                    lfuCache.sort((a, b) => {
+                        if (a.freq === b.freq) return a.time - b.time;
+                        return a.freq - b.freq;
+                    });
+                    const evicted = lfuCache.shift();
+                    addLog(`Cache Full! Evicted ${evicted.id} (Only had ${evicted.freq} views).`, 'info');
+                }
+                lfuCache.push({ id: page, freq: 1, time: timeStep });
+            }
+        }
+
+        function handleHybrid(page, capacity) {
+            const lruCap = Math.max(1, Math.floor(capacity / 2));
+            const lfuCap = Math.max(1, Math.ceil(capacity / 2));
+            const threshold = 3;
+
+            // Update permanent record
+            globalFreq[page] = (globalFreq[page] || 0) + 1;
+
+            // Check LRU (Probation)
+            const lruIdx = hybridLRU.indexOf(page);
+            if (lruIdx !== -1) {
+                hits++;
+                hybridLRU.splice(lruIdx, 1); // Remove from current spot
+                
+                if (globalFreq[page] >= threshold) {
+                    // GRADUATE!
+                    addLog(`🎓 ${page} hit ${threshold} views! Graduating to VIP LFU Tier!`, 'grad');
+                    handleHybridLFUInsert(page, lfuCap);
+                } else {
+                    hybridLRU.unshift(page); // Move to front of probation
+                    addLog(`Hit! ${page} stays in Probation. Views: ${globalFreq[page]}`, 'hit');
+                }
+                return;
+            }
+
+            // Check LFU (VIP)
+            const lfuIdx = hybridLFU.indexOf(page);
+            if (lfuIdx !== -1) {
+                hits++;
+                addLog(`Hit! ${page} accessed securely from VIP Tier. Views: ${globalFreq[page]}`, 'hit');
+                return; // Stays in VIP
+            }
+
+            // MISS - Must go to Probation
+            misses++;
+            addLog(`Miss. ${page} downloaded and put in Probation LRU.`, 'miss');
+            hybridLRU.unshift(page);
+            if (hybridLRU.length > lruCap) {
+                const evicted = hybridLRU.pop();
+                addLog(`Probation Full! Evicted ${evicted} from LRU.`, 'info');
+            }
+        }
+
+        function handleHybridLFUInsert(page, lfuCap) {
+            if (hybridLFU.length >= lfuCap) {
+                // Find least popular in VIP tier
+                let minPage = hybridLFU[0];
+                let minFreq = globalFreq[minPage];
+                let minIdx = 0;
+                
+                for(let i=1; i<hybridLFU.length; i++) {
+                    if (globalFreq[hybridLFU[i]] < minFreq) {
+                        minFreq = globalFreq[hybridLFU[i]];
+                        minPage = hybridLFU[i];
+                        minIdx = i;
+                    }
+                }
+                hybridLFU.splice(minIdx, 1);
+                addLog(`VIP Tier Full! Evicted ${minPage} to make room.`, 'info');
+            }
+            hybridLFU.push(page);
+        }
+
+        // --- UI Updates ---
+        function resetCache() {
+            hits = 0; misses = 0; timeStep = 0;
+            lruCache = []; lfuCache = []; 
+            hybridLRU = []; hybridLFU = []; globalFreq = {};
+            document.getElementById('logBox').innerHTML = '';
+            addLog('System Reset.', 'info');
+            updateStats();
+            renderVisuals(document.getElementById('policySelect').value);
+        }
+
+        function updateStats() {
+            document.getElementById('hitCount').innerText = hits;
+            document.getElementById('missCount').innerText = misses;
+            const total = hits + misses;
+            const ratio = total === 0 ? 0 : Math.round((hits / total) * 100);
+            document.getElementById('hitRatio').innerText = ratio + '%';
+        }
+
+        function createBlock(page, labelText = '') {
+            const div = document.createElement('div');
+            div.className = `cache-block bg-${page}`;
+            div.innerText = page;
+            if (labelText) {
+                const badge = document.createElement('div');
+                badge.className = 'badge';
+                badge.innerText = labelText;
+                div.appendChild(badge);
+            }
+            return div;
+        }
+
+        function renderVisuals(policy) {
+            const container = document.getElementById('vizContainer');
+            container.innerHTML = '';
+
+            if (policy === 'lru') {
+                container.innerHTML = `<div class="tier-title">LRU Queue (Front = Newest, Back = Oldest)</div>`;
+                const row = document.createElement('div');
+                row.className = 'cache-row';
+                lruCache.forEach(page => row.appendChild(createBlock(page)));
+                container.appendChild(row);
+            } 
+            else if (policy === 'lfu') {
+                container.innerHTML = `<div class="tier-title">LFU Memory (Organized by Popularity)</div>`;
+                const row = document.createElement('div');
+                row.className = 'cache-row';
+                // Sort visually by highest frequency first
+                const visualCopy = [...lfuCache].sort((a,b) => b.freq - a.freq);
+                visualCopy.forEach(item => {
+                    row.appendChild(createBlock(item.id, `v:${item.freq}`));
+                });
+                container.appendChild(row);
+            } 
+            else if (policy === 'hybrid') {
+                // LRU Tier
+                const lruDiv = document.createElement('div');
+                lruDiv.innerHTML = `<div class="tier-title">Tier 1: Probation (LRU) - Needs 3 views to graduate</div>`;
+                const row1 = document.createElement('div');
+                row1.className = 'cache-row';
+                hybridLRU.forEach(page => row1.appendChild(createBlock(page, `v:${globalFreq[page]}`)));
+                lruDiv.appendChild(row1);
+                
+                // LFU Tier
+                const lfuDiv = document.createElement('div');
+                lfuDiv.innerHTML = `<div class="tier-title" style="color:var(--primary);">Tier 2: VIP Lounge (LFU)</div>`;
+                const row2 = document.createElement('div');
+                row2.className = 'cache-row';
+                // Sort VIP visually by frequency
+                const visualVIP = [...hybridLFU].sort((a,b) => globalFreq[b] - globalFreq[a]);
+                visualVIP.forEach(page => row2.appendChild(createBlock(page, `v:${globalFreq[page]}`)));
+                lfuDiv.appendChild(row2);
+
+                container.appendChild(lruDiv);
+                container.appendChild(lfuDiv);
+            }
+        }
+
+        function addLog(msg, type) {
+            const logBox = document.getElementById('logBox');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.innerText = `> ${msg}`;
+            logBox.prepend(entry); // Add to top
+        }
+
+        // Init
+        resetCache();
+    </script>
+</body>
+</html>
